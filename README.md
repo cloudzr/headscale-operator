@@ -756,6 +756,37 @@ While backup is enabled, the `<name>-metrics` Service also exposes Litestream's 
   expr: increase(litestream_sync_error_count[10m]) > 0
 ```
 
+Litestream serves Go's profiling endpoints (`/debug/pprof/`) on the same port as its metrics, and any pod in the cluster can reach them. They expose no credentials, but CPU and heap profiles cost the pod resources. Limit port `9091` to your monitoring namespace with a NetworkPolicy. Once a policy selects the pod, all other ingress is denied, so list headscale's own ports too (adjust them to your `listen_addr`, `grpc_listen_addr`, `metrics_listen_addr` and embedded DERP):
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: headscale
+  namespace: headscale
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: headscale
+      app.kubernetes.io/instance: headscale   # the Headscale resource's name
+  policyTypes: [Ingress]
+  ingress:
+  # Headscale's own ports stay open as before
+  - ports:
+    - port: 8080        # listen_addr
+    - port: 50443       # grpc_listen_addr
+    - port: 9090        # metrics_listen_addr
+    - port: 3478        # embedded DERP STUN, if enabled
+      protocol: UDP
+  # Litestream (metrics and pprof) only from Prometheus
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+    ports:
+    - port: 9091
+```
+
 #### Operating Notes
 
 - **Rotating the S3 credentials.** The sidecars read the Secret when the pod starts. After changing it, restart the pod (`kubectl rollout restart statefulset/<name>`). Until then the condition reports `AgentNotReporting` if the old keys stop working.
