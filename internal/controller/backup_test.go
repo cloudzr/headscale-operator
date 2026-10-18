@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -132,6 +133,31 @@ var _ = Describe("planBackupFor", func() {
 	)
 })
 
+var _ = Describe("replicationProblem", func() {
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	h := func(syncInterval string) *headscalev1beta1.Headscale {
+		return &headscalev1beta1.Headscale{Spec: headscalev1beta1.HeadscaleSpec{Backup: &headscalev1beta1.BackupConfig{
+			Litestream: headscalev1beta1.LitestreamConfig{SyncInterval: syncInterval},
+		}}}
+	}
+	since := func(d time.Duration) *time.Time { t := now.Add(-d); return &t }
+
+	DescribeTable("judges the backup-agent heartbeat",
+		func(syncInterval string, hb *archive.Heartbeat, reason string) {
+			got, message := replicationProblem(h(syncInterval), hb, now)
+			Expect(got).To(Equal(reason), message)
+		},
+		Entry("healthy", "1s", &archive.Heartbeat{At: now.Add(-20 * time.Second), LocalTXID: 9, ArchivedTXID: 9}, ""),
+		Entry("idle database, old archive", "1s", &archive.Heartbeat{At: now, LocalTXID: 9, ArchivedTXID: 9}, ""),
+		Entry("no heartbeat", "1s", nil, "AgentNotReporting"),
+		Entry("stale heartbeat", "1s", &archive.Heartbeat{At: now.Add(-10 * time.Minute)}, "AgentNotReporting"),
+		Entry("Litestream metrics unreadable", "1s", &archive.Heartbeat{At: now, Error: "connection refused"}, "ReplicationUnknown"),
+		Entry("short lag", "1s", &archive.Heartbeat{At: now, LocalTXID: 10, ArchivedTXID: 9, LaggingSince: since(30 * time.Second)}, ""),
+		Entry("lasting lag", "1s", &archive.Heartbeat{At: now, LocalTXID: 10, ArchivedTXID: 9, LaggingSince: since(5 * time.Minute)}, "ReplicationStalled"),
+		Entry("lag within 3x a long sync_interval", "10m", &archive.Heartbeat{At: now, LocalTXID: 10, ArchivedTXID: 9, LaggingSince: since(20 * time.Minute)}, ""),
+	)
+})
+
 var _ = Describe("Backup rendering", func() {
 	newHeadscale := func() *headscalev1beta1.Headscale {
 		h := goldenHeadscale(func(h *headscalev1beta1.Headscale) {
@@ -193,6 +219,8 @@ snapshot:
 			"--destination=s3://bucket/prod",
 			"--key=noise=/var/lib/headscale/noise_private.key",
 			"--key=derp=/var/lib/headscale/derp_server_private.key",
+			"--db=/var/lib/headscale/db.sqlite",
+			"--litestream-metrics=http://127.0.0.1:9091/metrics",
 		))
 		Expect(agent.VolumeMounts).To(ContainElement(HaveField("ReadOnly", true)))
 		Expect(spec.Volumes).To(ContainElement(HaveField("Name", litestreamConfigVolumeName)))
@@ -339,6 +367,12 @@ var _ = Describe("Headscale backup reconciliation", func() {
 		Expect(archive.WriteManifest(ctx, store, m)).To(Succeed())
 	}
 
+	heartbeat := func(at time.Time) {
+		data, err := json.Marshal(archive.Heartbeat{At: at, LocalTXID: 2, ArchivedTXID: 2})
+		Expect(err).NotTo(HaveOccurred())
+		store.SetObject(archive.HeartbeatKey, data, at)
+	}
+
 	BeforeEach(func() {
 		ctx = context.Background()
 		store = &objectstore.Memory{}
@@ -440,8 +474,13 @@ var _ = Describe("Headscale backup reconciliation", func() {
 		Expect(archivingCondition().Reason).To(Equal("KeysNotArchived"))
 		Expect(archivingCondition().Message).To(ContainSubstring("derp"))
 
-		By("archiving")
+		By("waiting for the backup-agent to report")
 		seedArchive(archive.RoleNoise, archive.RoleDERP)
+		reconcileOnce()
+		Expect(archivingCondition().Reason).To(Equal("AgentNotReporting"))
+
+		By("archiving")
+		heartbeat(time.Now())
 		res := reconcileOnce()
 		cond := archivingCondition()
 		Expect(cond.Status).To(Equal(metav1.ConditionTrue), cond.Message)
@@ -453,6 +492,14 @@ var _ = Describe("Headscale backup reconciliation", func() {
 		// Ready is still False (no StatefulSet controller), which wins.
 		Expect(res.RequeueAfter).To(Equal(notReadyRequeue))
 		Expect(recordedEvents()).To(ContainElement(HavePrefix("Normal Archiving")))
+
+		By("noticing that the pod stopped reporting, although the operator still reaches the archive")
+		heartbeat(time.Now().Add(-time.Hour))
+		reconcileOnce()
+		cond = archivingCondition()
+		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(cond.Reason).To(Equal("AgentNotReporting"))
+		Expect(recordedEvents()).To(ContainElement(HavePrefix("Warning AgentNotReporting")))
 	})
 
 	It("reports a suspended instance without polling it", func() {

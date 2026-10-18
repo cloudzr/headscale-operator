@@ -50,7 +50,9 @@ const (
 	// litestreamMetricsPort must not collide with headscale's ports, which
 	// share the pod's network namespace; planBackupFor checks this.
 	litestreamMetricsPort int32 = 9091
-	keyArchiveInterval          = "30s"
+	// keyArchiveInterval is also how often the backup-agent writes the
+	// replication heartbeat.
+	keyArchiveInterval = 30 * time.Second
 
 	// DefaultBackupAgentImage is used when neither the operator flag nor
 	// spec.backup.agent.image sets one.
@@ -68,6 +70,14 @@ const (
 	// objectStoreTimeout bounds every object store round of a reconcile, so
 	// an unreachable endpoint can't hold a worker.
 	objectStoreTimeout = 30 * time.Second
+
+	// heartbeatStaleAfter is how old the backup-agent's heartbeat may get
+	// before the pod is considered unable to reach the archive.
+	heartbeatStaleAfter = 3 * time.Minute
+	// minReplicationLagTolerance is the shortest time the archive may lag
+	// behind the local database before archiving is reported as stalled. The
+	// tolerance grows with sync_interval (3x).
+	minReplicationLagTolerance = 2 * time.Minute
 
 	// minLitestreamHeadscaleVersion is the first headscale release that
 	// ignores Litestream's tables (_litestream_seq, _litestream_lock) when it
@@ -332,8 +342,7 @@ func (r *HeadscaleReconciler) addBackupSidecars(h *headscalev1beta1.Headscale, s
 			Image:           r.backupAgentImageFor(h),
 			ImagePullPolicy: corev1.PullIfNotPresent,
 			RestartPolicy:   new(corev1.ContainerRestartPolicyAlways),
-			Args: append(append([]string{"archive-keys"}, objectStoreArgs(b.ObjectStore)...),
-				append(plan.keyArgs(), "--interval="+keyArchiveInterval)...),
+			Args:            backupAgentArgs(b.ObjectStore, plan),
 			Env:             env,
 			VolumeMounts:    []corev1.VolumeMount{readOnlyDataMount},
 			Resources:       b.Agent.Resources,
@@ -344,6 +353,19 @@ func (r *HeadscaleReconciler) addBackupSidecars(h *headscalev1beta1.Headscale, s
 		Name:      litestreamConfigVolumeName,
 		ConfigMap: &corev1.ConfigMapVolumeSource{Name: litestreamConfigMapNameFor(h)},
 	})
+}
+
+// backupAgentArgs runs the agent's archive-keys loop, which also reports
+// Litestream's progress (read from its metrics in the same pod) as the
+// archive's heartbeat.
+func backupAgentArgs(store headscalev1beta1.ObjectStoreConfig, plan backupPlan) []string {
+	args := append([]string{"archive-keys"}, objectStoreArgs(store)...)
+	args = append(args, plan.keyArgs()...)
+	return append(args,
+		"--db="+plan.DBPath,
+		fmt.Sprintf("--litestream-metrics=http://127.0.0.1:%d/metrics", litestreamMetricsPort),
+		"--interval="+keyArchiveInterval.String(),
+	)
 }
 
 // backupState carries the outcome of the pre-StatefulSet backup checks into
@@ -521,8 +543,40 @@ func (r *HeadscaleReconciler) computeArchivingCondition(ctx context.Context, h *
 	if len(missing) > 0 {
 		return cond(metav1.ConditionFalse, "KeysNotArchived", "Waiting for the %s private key(s) to be archived", strings.Join(missing, ", "))
 	}
+	if reason, message := replicationProblem(h, in.Heartbeat, time.Now()); reason != "" {
+		return cond(metav1.ConditionFalse, reason, "%s", message)
+	}
 	return cond(metav1.ConditionTrue, "Archiving", "Archiving to %s; last backup at %s",
 		h.Spec.Backup.ObjectStore.DestinationPath, in.LastBackup.UTC().Format(time.RFC3339))
+}
+
+// replicationProblem judges the backup-agent's heartbeat. The operator can
+// reach the archive (it just inspected it), but the pod uses its own copy of
+// the credentials and its own network path: only the heartbeat shows that
+// the pod still archives. It returns an empty reason when replication is
+// healthy.
+func replicationProblem(h *headscalev1beta1.Headscale, hb *archive.Heartbeat, now time.Time) (reason, message string) {
+	if hb == nil {
+		return "AgentNotReporting", "The backup-agent has not reported yet: the pod may not reach the object store"
+	}
+	if age := now.Sub(hb.At); age > heartbeatStaleAfter {
+		return "AgentNotReporting", fmt.Sprintf(
+			"The backup-agent last reported at %s: the pod can no longer write to the archive (credentials, network or permissions)",
+			hb.At.UTC().Format(time.RFC3339))
+	}
+	if hb.Error != "" {
+		return "ReplicationUnknown", "The backup-agent could not read Litestream's progress: " + hb.Error
+	}
+	tolerance := minReplicationLagTolerance
+	if d, err := time.ParseDuration(h.Spec.Backup.Litestream.SyncInterval); err == nil && 3*d > tolerance {
+		tolerance = 3 * d
+	}
+	if hb.LaggingSince != nil && hb.At.Sub(*hb.LaggingSince) > tolerance {
+		return "ReplicationStalled", fmt.Sprintf(
+			"Litestream has not shipped the latest transactions since %s (local transaction %d, archived %d)",
+			hb.LaggingSince.UTC().Format(time.RFC3339), hb.LocalTXID, hb.ArchivedTXID)
+	}
+	return "", ""
 }
 
 // stoppedBackupSidecars returns the backup sidecars that are not running in

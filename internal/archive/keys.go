@@ -56,6 +56,8 @@ type KeyArchiver struct {
 	Log   logr.Logger
 	// Now defaults to time.Now.
 	Now func() time.Time
+	// Reporter, when set, writes the replication heartbeat on every tick.
+	Reporter *ReplicationReporter
 
 	manifest *Manifest
 }
@@ -106,8 +108,9 @@ func (a *KeyArchiver) Sync(ctx context.Context) (bool, error) {
 	return done, nil
 }
 
-// Run calls Sync every interval until ctx is cancelled. Errors are logged and
-// retried: a temporarily unreachable object store must never stop the agent.
+// Run calls Sync, then the Reporter, every interval until ctx is cancelled.
+// Errors are logged and retried: a temporarily unreachable object store must
+// never stop the agent.
 func (a *KeyArchiver) Run(ctx context.Context, interval time.Duration) {
 	archived := false
 	for {
@@ -121,6 +124,12 @@ func (a *KeyArchiver) Run(ctx context.Context, interval time.Duration) {
 			a.Log.V(1).Info("Waiting for headscale to generate private keys")
 		}
 		archived = err == nil && done
+
+		if a.Reporter != nil {
+			if _, err := a.Reporter.Report(ctx); err != nil {
+				a.Log.Error(err, "Failed to write the replication heartbeat")
+			}
+		}
 
 		select {
 		case <-ctx.Done():

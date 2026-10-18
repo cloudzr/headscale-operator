@@ -17,7 +17,8 @@ limitations under the License.
 // Command backup-agent archives headscale's private keys next to the
 // Litestream database replica, and restores them during a recovery.
 //
-//	backup-agent archive-keys --destination s3://bucket/prefix --key noise=/var/lib/headscale/noise_private.key
+//	backup-agent archive-keys --destination s3://bucket/prefix --key noise=/var/lib/headscale/noise_private.key \
+//	                          --db /var/lib/headscale/db.sqlite --litestream-metrics http://127.0.0.1:9091/metrics
 //	backup-agent restore      --destination s3://bucket/prefix --key noise=... --db /var/lib/headscale/db.sqlite
 //
 // Credentials are read from AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, the
@@ -129,7 +130,9 @@ func archiveKeys(ctx context.Context, args []string) error {
 	var keys keyFlags
 	store.register(fs)
 	fs.Var(&keys, "key", "Private key to archive as role=path (repeatable)")
-	interval := fs.Duration("interval", 30*time.Second, "How often to check the keys for changes")
+	interval := fs.Duration("interval", 30*time.Second, "How often to check the keys and write the heartbeat")
+	dbPath := fs.String("db", "", "Path of the headscale SQLite database Litestream replicates")
+	metricsURL := fs.String("litestream-metrics", "", "Litestream's metrics URL; enables the replication heartbeat")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -141,9 +144,13 @@ func archiveKeys(ctx context.Context, args []string) error {
 		return err
 	}
 
-	log.Info("Starting private key archiving",
-		"destination", store.destination, "keys", keys.String(), "interval", interval.String())
-	(&archive.KeyArchiver{Store: s, Keys: keys, Log: log}).Run(ctx, *interval)
+	archiver := &archive.KeyArchiver{Store: s, Keys: keys, Log: log}
+	if *metricsURL != "" {
+		archiver.Reporter = &archive.ReplicationReporter{Store: s, MetricsURL: *metricsURL, DBPath: *dbPath}
+	}
+	log.Info("Starting private key archiving", "destination", store.destination, "keys", keys.String(),
+		"interval", interval.String(), "heartbeat", archiver.Reporter != nil)
+	archiver.Run(ctx, *interval)
 	log.Info("Stopped private key archiving")
 	return nil
 }

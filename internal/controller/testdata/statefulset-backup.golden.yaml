@@ -140,6 +140,8 @@ spec:
         - --region=us-east-1
         - --key=noise=/var/lib/headscale/noise_private.key
         - --key=derp=/var/lib/headscale/derp_server_private.key
+        - --db=/var/lib/headscale/db.sqlite
+        - --litestream-metrics=http://127.0.0.1:9091/metrics
         - --interval=30s
         env:
         - name: AWS_ACCESS_KEY_ID

@@ -30,12 +30,15 @@ backup-agent archive-keys \
   --endpoint https://minio.example.com --region us-east-1 \
   --key noise=/var/lib/headscale/noise_private.key \
   --key derp=/var/lib/headscale/derp_server_private.key \
+  --db /var/lib/headscale/db.sqlite \
+  --litestream-metrics http://127.0.0.1:9091/metrics \
   --interval 30s
 ```
 
 - Waits until Headscale has generated each key (it does so on first start).
 - Uploads `keys/<role>.key`, then records its SHA-256 in `keys/manifest.json`.
 - Re-uploads a key only when its checksum differs from the manifest, also across restarts.
+- With `--litestream-metrics`, writes `agent/heartbeat.json` every interval: Litestream's local position (`litestream_txid`), the highest transaction in the archive, and since when the archive lags behind. The operator turns a stale heartbeat or a lasting lag into `ContinuousArchiving=False`, so a pod that can no longer reach the archive is noticed even while the operator still can.
 - Retries forever on object store errors: an outage never stops the agent or Headscale.
 
 ### `restore` (recovery Job)

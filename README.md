@@ -560,7 +560,7 @@ With `spec.backup` set, two sidecars run next to Headscale:
 | Sidecar | What it archives | How |
 |---------|------------------|-----|
 | `litestream` | the SQLite database | [Litestream](https://litestream.io) ships every WAL change (each `sync_interval`, 1s by default) plus periodic snapshots |
-| `backup-agent` | `noise.private_key_path` and, with embedded DERP, `derp.server.private_key_path` | uploads each key once (and again only if it changes) with a checksum manifest |
+| `backup-agent` | `noise.private_key_path` and, with embedded DERP, `derp.server.private_key_path` | uploads each key once (and again only if it changes) with a checksum manifest, and every 30s writes a heartbeat with Litestream's progress |
 
 The private keys matter as much as the database: the noise key **is the server's identity**. A database restored without it gives the server a new identity, and every client has to re-register. Archiving both keeps one archive self-sufficient for a recovery:
 
@@ -570,6 +570,7 @@ s3://<bucket>/<prefix>/
 ├── keys/noise.key            # headscale private keys
 ├── keys/derp.key
 ├── keys/manifest.json        # checksums of the archived keys
+├── agent/heartbeat.json      # replication progress, reported from inside the pod
 └── .headscale-operator.json  # which Headscale instance owns this archive
 ```
 
@@ -637,13 +638,17 @@ kubectl get headscale headscale -n headscale -o jsonpath='{.status.backup}' | jq
 # }
 ```
 
-The `ContinuousArchiving` condition is `True` once the sidecars run, a base snapshot is in the archive and all keys are archived. Otherwise its reason says why:
+The `ContinuousArchiving` condition is `True` once the sidecars run, a base snapshot is in the archive, all keys are archived and the backup-agent's heartbeat shows that the pod keeps up. The heartbeat matters because the operator and the pod reach the archive independently: the pod keeps the credentials it started with and has its own network path, so an archive the operator can read says nothing about the pod still writing to it. The agent compares Litestream's position in the local database with the newest transaction in the archive. An idle database is not lagging, so a quiet instance never looks stale. Otherwise the reason says why:
 
 | Reason | Meaning |
 |--------|---------|
 | `SidecarNotReady` | The `litestream` or `backup-agent` sidecar is not running yet |
 | `NoBaseSnapshot` | Waiting for Litestream to upload the first snapshot |
 | `KeysNotArchived` | Waiting for Headscale to generate, or the agent to upload, a private key |
+| `AgentNotReporting` | No heartbeat from the backup-agent for 3 minutes: the pod cannot write to the archive (revoked or rotated credentials, network, permissions) |
+| `ReplicationStalled` | Litestream has not shipped the latest transactions for longer than `max(2m, 3 × sync_interval)` |
+| `ReplicationUnknown` | The agent cannot read Litestream's metrics |
+| `Suspended` (`Unknown`) | `replicas: 0`: no pod runs, so nothing is archived |
 | `CredentialsMissing` | The credentials Secret or key does not exist |
 | `ObjectStoreUnreachable` | The archive could not be read or written |
 | `ArchiveInUse` | Another Headscale instance owns `destination_path` |

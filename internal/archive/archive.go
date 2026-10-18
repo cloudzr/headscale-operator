@@ -20,6 +20,7 @@ limitations under the License.
 //	<root>/db/...                    Litestream replica of the SQLite database
 //	<root>/keys/<role>.key           headscale private keys (noise, derp)
 //	<root>/keys/manifest.json        checksums of the archived keys
+//	<root>/agent/heartbeat.json      replication state reported by the backup-agent
 //	<root>/.headscale-operator.json  marker naming the instance that owns the archive
 package archive
 
@@ -161,6 +162,8 @@ type Inspection struct {
 	LastBackup *time.Time
 	Manifest   *Manifest
 	Marker     *Marker
+	// Heartbeat is the backup-agent's latest report, or nil.
+	Heartbeat *Heartbeat
 }
 
 // MissingKeys returns the roles that are not in the manifest.
@@ -202,6 +205,9 @@ func Inspect(ctx context.Context, store objectstore.Store) (Inspection, error) {
 		return in, err
 	}
 	if in.Marker, err = ReadMarker(ctx, store); err != nil {
+		return in, err
+	}
+	if in.Heartbeat, err = ReadHeartbeat(ctx, store); err != nil {
 		return in, err
 	}
 	return in, nil
