@@ -1,5 +1,9 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
+# VERSION is the operator release built into the manager. It is also the tag of
+# the default backup-agent image, which must come from the same release.
+VERSION ?= latest
+LDFLAGS ?= -X github.com/infradohq/headscale-operator/internal/controller.Version=$(VERSION)
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 # API Key Manager image
@@ -114,7 +118,7 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 
 .PHONY: build
 build: manifests generate fmt vet ## Build manager binary.
-	go build -o bin/manager cmd/main.go
+	go build -ldflags "$(LDFLAGS)" -o bin/manager cmd/main.go
 
 .PHONY: build-apikey-manager
 build-apikey-manager: ## Build API key manager binary.
@@ -138,7 +142,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # make docker-build IMG=<img> BASE_IMAGE=docker.io/library/golang:1.26
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build $(if $(BASE_IMAGE),--build-arg BASE_IMAGE=$(BASE_IMAGE)) -t ${IMG} .
+	$(CONTAINER_TOOL) build $(if $(BASE_IMAGE),--build-arg BASE_IMAGE=$(BASE_IMAGE)) --build-arg VERSION=$(VERSION) -t ${IMG} .
 
 .PHONY: docker-build-apikey-manager
 docker-build-apikey-manager: ## Build docker image with the API key manager.
@@ -179,7 +183,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name headscale-operator-builder
 	$(CONTAINER_TOOL) buildx use headscale-operator-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) $(if $(BASE_IMAGE),--build-arg BASE_IMAGE=$(BASE_IMAGE)) --tag ${IMG} -f Dockerfile.cross .
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) $(if $(BASE_IMAGE),--build-arg BASE_IMAGE=$(BASE_IMAGE)) --build-arg VERSION=$(VERSION) --tag ${IMG} -f Dockerfile.cross .
 	- $(CONTAINER_TOOL) buildx rm headscale-operator-builder
 	rm Dockerfile.cross
 

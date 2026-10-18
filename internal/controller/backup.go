@@ -54,9 +54,8 @@ const (
 	// replication heartbeat.
 	keyArchiveInterval = 30 * time.Second
 
-	// DefaultBackupAgentImage is used when neither the operator flag nor
-	// spec.backup.agent.image sets one.
-	DefaultBackupAgentImage = "ghcr.io/infradohq/headscale-operator/backup-agent:latest"
+	// backupAgentRepository is where releases publish the backup-agent image.
+	backupAgentRepository = "ghcr.io/infradohq/headscale-operator/backup-agent"
 
 	// backupConfigHashAnnotation rolls the pod when the backup sidecars'
 	// configuration changes. It is separate from the config-hash annotation
@@ -85,6 +84,16 @@ const (
 	// refuse to start on a database Litestream has replicated.
 	minLitestreamHeadscaleVersion = "v0.27.1"
 )
+
+// Version is the operator release, set at build time with
+// -ldflags "-X github.com/infradohq/headscale-operator/internal/controller.Version=<tag>".
+var Version = "latest"
+
+// DefaultBackupAgentImage is used when neither the operator flag nor
+// spec.backup.agent.image sets one. It carries the operator's own release
+// tag: the operator and the agent share the archive layout, so they must
+// come from the same release.
+func DefaultBackupAgentImage() string { return backupAgentRepository + ":" + Version }
 
 func litestreamConfigMapNameFor(h *headscalev1beta1.Headscale) string { return h.Name + "-litestream" }
 
@@ -288,7 +297,7 @@ func (r *HeadscaleReconciler) backupAgentImageFor(h *headscalev1beta1.Headscale)
 	if r.BackupAgentImage != "" {
 		return r.BackupAgentImage
 	}
-	return DefaultBackupAgentImage
+	return DefaultBackupAgentImage()
 }
 
 // restrictedSecurityContext matches the headscale container's.

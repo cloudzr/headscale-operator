@@ -230,7 +230,7 @@ snapshot:
 
 	It("picks the backup-agent image from the spec, then the operator flag, then the default", func() {
 		h := newHeadscale()
-		Expect((&HeadscaleReconciler{}).backupAgentImageFor(h)).To(Equal(DefaultBackupAgentImage))
+		Expect((&HeadscaleReconciler{}).backupAgentImageFor(h)).To(Equal(DefaultBackupAgentImage()))
 		Expect((&HeadscaleReconciler{BackupAgentImage: "flag:v1"}).backupAgentImageFor(h)).To(Equal("flag:v1"))
 		h.Spec.Backup.Agent.Image = "spec:v2"
 		Expect((&HeadscaleReconciler{BackupAgentImage: "flag:v1"}).backupAgentImageFor(h)).To(Equal("spec:v2"))
