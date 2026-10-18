@@ -230,7 +230,7 @@ func (r *HeadscaleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	switch {
-	case requeue || (archivingCond != nil && archivingCond.Status != metav1.ConditionTrue):
+	case requeue || (archivingCond != nil && archivingCond.Status == metav1.ConditionFalse):
 		return ctrl.Result{RequeueAfter: notReadyRequeue}, nil
 	case archivingCond != nil:
 		// Refresh the recoverability window shown in status.backup.
@@ -408,19 +408,7 @@ func (r *HeadscaleReconciler) updateStatus(
 	headscale *headscalev1beta1.Headscale,
 	conds ...metav1.Condition,
 ) error {
-	patch := client.MergeFrom(headscale.DeepCopy())
-
-	changed := false
-	for _, cond := range conds {
-		if meta.SetStatusCondition(&headscale.Status.Conditions, cond) {
-			changed = true
-		}
-	}
-	if !changed {
-		return nil
-	}
-
-	return r.Status().Patch(ctx, headscale, patch)
+	return r.patchStatus(ctx, headscale, client.MergeFrom(headscale.DeepCopy()), false, conds)
 }
 
 // updateStatusWithBackup is updateStatus plus the backup status: it sets
@@ -442,6 +430,17 @@ func (r *HeadscaleReconciler) updateStatusWithBackup(
 	} else if meta.RemoveStatusCondition(&headscale.Status.Conditions, continuousArchivingConditionType) {
 		changed = true
 	}
+	return r.patchStatus(ctx, headscale, patch, changed, conds)
+}
+
+// patchStatus sets conds and patches the status when anything changed.
+func (r *HeadscaleReconciler) patchStatus(
+	ctx context.Context,
+	headscale *headscalev1beta1.Headscale,
+	patch client.Patch,
+	changed bool,
+	conds []metav1.Condition,
+) error {
 	for _, cond := range conds {
 		if meta.SetStatusCondition(&headscale.Status.Conditions, cond) {
 			changed = true
@@ -450,7 +449,6 @@ func (r *HeadscaleReconciler) updateStatusWithBackup(
 	if !changed {
 		return nil
 	}
-
 	return r.Status().Patch(ctx, headscale, patch)
 }
 

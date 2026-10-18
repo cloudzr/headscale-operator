@@ -74,7 +74,9 @@ var _ = Describe("Backup config view", func() {
 })
 
 var _ = Describe("planBackupFor", func() {
-	plan := func(cfg string) (backupPlan, error) { return planBackupFor(parseConfigView(rawConfig(cfg))) }
+	plan := func(cfg string) (backupPlan, error) {
+		return planBackupFor(testHeadscaleVersion, parseConfigView(rawConfig(cfg)))
+	}
 
 	It("archives the database and both keys", func() {
 		p, err := plan(backupConfigJSON)
@@ -111,6 +113,23 @@ var _ = Describe("planBackupFor", func() {
 		Entry("path escaping the data volume", `{"database":{"type":"sqlite","sqlite":{"path":"/var/lib/headscale/../db.sqlite"}}}`, "UnsupportedPath"),
 		Entry("port conflict", `{"metrics_listen_addr":"0.0.0.0:9091","database":{"type":"sqlite","sqlite":{"path":"/var/lib/headscale/db.sqlite"}}}`, "PortConflict"),
 	)
+
+	DescribeTable("requires a headscale that starts on a Litestream-replicated database",
+		func(version string, ok bool) {
+			_, err := planBackupFor(version, parseConfigView(rawConfig(backupConfigJSON)))
+			if ok {
+				Expect(err).NotTo(HaveOccurred())
+				return
+			}
+			Expect(conditionReason(err, "")).To(Equal("UnsupportedVersion"))
+			Expect(err.Error()).To(ContainSubstring(minLitestreamHeadscaleVersion))
+		},
+		Entry("v0.26.1", "v0.26.1", false),
+		Entry("0.27.0 without v prefix", "0.27.0", false),
+		Entry("first compatible release", "v0.27.1", true),
+		Entry("minor-only version", "0.29", true),
+		Entry("wildcard, left to headscale", "0.*", true),
+	)
 })
 
 var _ = Describe("Backup rendering", func() {
@@ -123,7 +142,7 @@ var _ = Describe("Backup rendering", func() {
 	}
 	render := func(r *HeadscaleReconciler, h *headscalev1beta1.Headscale) *appsv1.StatefulSet {
 		view := parseConfigView(h.Spec.Config)
-		p, err := planBackupFor(view)
+		p, err := planBackupFor(h.Spec.Version, view)
 		Expect(err).NotTo(HaveOccurred())
 		cfg, err := renderLitestreamConfig(h.Spec.Backup, p)
 		Expect(err).NotTo(HaveOccurred())
@@ -137,7 +156,7 @@ var _ = Describe("Backup rendering", func() {
 
 	It("renders the Litestream configuration", func() {
 		h := newHeadscale()
-		p, err := planBackupFor(parseConfigView(h.Spec.Config))
+		p, err := planBackupFor(h.Spec.Version, parseConfigView(h.Spec.Config))
 		Expect(err).NotTo(HaveOccurred())
 		out, err := renderLitestreamConfig(h.Spec.Backup, p)
 		Expect(err).NotTo(HaveOccurred())
@@ -434,6 +453,27 @@ var _ = Describe("Headscale backup reconciliation", func() {
 		// Ready is still False (no StatefulSet controller), which wins.
 		Expect(res.RequeueAfter).To(Equal(notReadyRequeue))
 		Expect(recordedEvents()).To(ContainElement(HavePrefix("Normal Archiving")))
+	})
+
+	It("reports a suspended instance without polling it", func() {
+		create(backupConfigJSON, backupSpec("s3://bucket/suspended"))
+		updateSpec(func(h *headscalev1beta1.Headscale) { h.Spec.Replicas = 0 })
+		Expect(reconcileOnce().RequeueAfter).To(Equal(backupStatusRequeue))
+		cond := archivingCondition()
+		Expect(cond.Status).To(Equal(metav1.ConditionUnknown))
+		Expect(cond.Reason).To(Equal("Suspended"))
+	})
+
+	It("reports no archive while a new destination cannot be claimed", func() {
+		create(backupConfigJSON, backupSpec("s3://bucket/first"))
+		reconcileOnce()
+		Expect(getHeadscale().Status.Backup.DestinationPath).To(Equal("s3://bucket/first"))
+
+		store.Err = errors.New("connection refused")
+		updateSpec(func(h *headscalev1beta1.Headscale) { h.Spec.Backup.ObjectStore.DestinationPath = "s3://bucket/second" })
+		reconcileOnce()
+		Expect(archivingCondition().Reason).To(Equal("ObjectStoreUnreachable"))
+		Expect(getHeadscale().Status.Backup).To(BeNil(), "the old path is no longer archived to")
 	})
 
 	It("removes everything when backup is disabled", func() {

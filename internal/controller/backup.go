@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/mod/semver"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -63,6 +64,16 @@ const (
 	// backupStatusRequeue is how often the archive is inspected to refresh
 	// status.backup and the ContinuousArchiving condition.
 	backupStatusRequeue = 5 * time.Minute
+
+	// objectStoreTimeout bounds every object store round of a reconcile, so
+	// an unreachable endpoint can't hold a worker.
+	objectStoreTimeout = 30 * time.Second
+
+	// minLitestreamHeadscaleVersion is the first headscale release that
+	// ignores Litestream's tables (_litestream_seq, _litestream_lock) when it
+	// validates its SQLite schema (juanfont/headscale#2843). Older releases
+	// refuse to start on a database Litestream has replicated.
+	minLitestreamHeadscaleVersion = "v0.27.1"
 )
 
 func litestreamConfigMapNameFor(h *headscalev1beta1.Headscale) string { return h.Name + "-litestream" }
@@ -97,10 +108,29 @@ func conditionReason(err error, fallback string) string {
 	return fallback
 }
 
-// planBackupFor checks that the headscale config can be archived by
-// Litestream and returns what to archive. Only SQLite in WAL mode with the
+// checkLitestreamCompatible refuses headscale versions that don't start on a
+// database Litestream has replicated. Versions that aren't plain semver (for
+// example "0.*") can't be compared and are left to headscale.
+func checkLitestreamCompatible(version string) error {
+	v := version
+	if !strings.HasPrefix(v, "v") {
+		v = "v" + v
+	}
+	if semver.IsValid(v) && semver.Compare(v, minLitestreamHeadscaleVersion) < 0 {
+		return newConditionError("UnsupportedVersion",
+			"headscale %s refuses to start on a database replicated by Litestream; backup and recovery require %s or newer",
+			version, minLitestreamHeadscaleVersion)
+	}
+	return nil
+}
+
+// planBackupFor checks that the headscale version and config can be archived
+// by Litestream and returns what to archive. Only SQLite in WAL mode with the
 // database on the data volume is supported.
-func planBackupFor(view headscaleConfigView) (backupPlan, error) {
+func planBackupFor(version string, view headscaleConfigView) (backupPlan, error) {
+	if err := checkLitestreamCompatible(version); err != nil {
+		return backupPlan{}, err
+	}
 	switch view.DatabaseType {
 	case "sqlite", "sqlite3":
 	case "":
@@ -342,13 +372,20 @@ func (r *HeadscaleReconciler) prepareBackup(ctx context.Context, h *headscalev1b
 		return backupState{}
 	}
 	state := backupState{status: h.Status.Backup.DeepCopy()}
+	dest := b.ObjectStore.DestinationPath
+	claimed := state.status != nil && state.status.DestinationPath == dest
 	fail := func(reason, message string) backupState {
 		cond := newCondition(h, continuousArchivingConditionType, metav1.ConditionFalse, reason, message)
 		state.cond = &cond
+		if !claimed {
+			// status.backup names the archive this instance writes to: none
+			// until destination_path is claimed.
+			state.status = nil
+		}
 		return state
 	}
 
-	plan, err := planBackupFor(view)
+	plan, err := planBackupFor(h.Spec.Version, view)
 	if err != nil {
 		return fail(conditionReason(err, "InvalidConfiguration"), err.Error())
 	}
@@ -356,8 +393,6 @@ func (r *HeadscaleReconciler) prepareBackup(ctx context.Context, h *headscalev1b
 	if err != nil {
 		return fail("InvalidConfiguration", err.Error())
 	}
-	dest := b.ObjectStore.DestinationPath
-	claimed := state.status != nil && state.status.DestinationPath == dest
 	if claimed {
 		state.plan, state.litestreamConfig = &plan, rendered
 	}
@@ -369,7 +404,9 @@ func (r *HeadscaleReconciler) prepareBackup(ctx context.Context, h *headscalev1b
 		return state
 	}
 
-	err = archive.Claim(ctx, state.store, archive.Marker{
+	claimCtx, cancel := context.WithTimeout(ctx, objectStoreTimeout)
+	defer cancel()
+	err = archive.Claim(claimCtx, state.store, archive.Marker{
 		Namespace: h.Namespace,
 		Name:      h.Name,
 		UID:       string(h.UID),
@@ -377,7 +414,9 @@ func (r *HeadscaleReconciler) prepareBackup(ctx context.Context, h *headscalev1b
 	})
 	switch {
 	case errors.Is(err, archive.ErrArchiveInUse):
-		return fail("ArchiveInUse", err.Error()+"; choose another backup.object_store.destination_path")
+		return fail("ArchiveInUse", err.Error()+
+			"; choose another backup.object_store.destination_path (a re-created Headscale resource is another instance:"+
+			" archive to a new path, or delete the marker if the previous owner is gone for good)")
 	case err != nil:
 		return fail("ObjectStoreUnreachable", fmt.Sprintf("Could not claim the archive: %v", err))
 	}
@@ -454,7 +493,9 @@ func (r *HeadscaleReconciler) computeArchivingCondition(ctx context.Context, h *
 		return &c
 	}
 
-	in, err := archive.Inspect(ctx, state.store)
+	inspectCtx, cancel := context.WithTimeout(ctx, objectStoreTimeout)
+	defer cancel()
+	in, err := archive.Inspect(inspectCtx, state.store)
 	if err != nil {
 		return cond(metav1.ConditionFalse, "ObjectStoreUnreachable", "Could not inspect the archive: %v", err)
 	}
@@ -467,6 +508,9 @@ func (r *HeadscaleReconciler) computeArchivingCondition(ctx context.Context, h *
 	if in.Marker != nil && in.Marker.UID != string(h.UID) {
 		return cond(metav1.ConditionFalse, "ArchiveInUse",
 			"The archive is now claimed by %s; this instance must archive elsewhere", in.Marker)
+	}
+	if h.Spec.Replicas == 0 {
+		return cond(metav1.ConditionUnknown, "Suspended", "No pod runs with replicas: 0, so nothing is archived")
 	}
 	if notRunning := r.stoppedBackupSidecars(ctx, h); len(notRunning) > 0 {
 		return cond(metav1.ConditionFalse, "SidecarNotReady", "Waiting for the %s sidecar to run", strings.Join(notRunning, " and "))
@@ -516,7 +560,7 @@ func (r *HeadscaleReconciler) emitArchivingEvent(h *headscalev1beta1.Headscale, 
 		// Waiting for the first snapshot or the sidecars to start is expected
 		// right after enabling backup; only flag real problems as warnings.
 		switch cond.Reason {
-		case "SidecarNotReady", "NoBaseSnapshot", "KeysNotArchived":
+		case "SidecarNotReady", "NoBaseSnapshot", "KeysNotArchived", "Suspended":
 		default:
 			eventType = corev1.EventTypeWarning
 		}
