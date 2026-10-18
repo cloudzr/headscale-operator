@@ -60,6 +60,18 @@ var _ = Describe("Memory", func() {
 	})
 })
 
+var _ = Describe("Memory PutIfAbsent", func() {
+	ctx := context.Background()
+
+	It("writes once and then reports the existing object", func() {
+		m := &Memory{}
+		Expect(m.PutIfAbsent(ctx, "marker", []byte("a"))).To(Succeed())
+		err := m.PutIfAbsent(ctx, "marker", []byte("b"))
+		Expect(errors.Is(err, ErrExists)).To(BeTrue())
+		Expect(m.Get(ctx, "marker")).To(Equal([]byte("a")))
+	})
+})
+
 // The S3 implementation is exercised against a real S3-compatible server when
 // OBJECTSTORE_TEST_ENDPOINT is set (e.g. a local versitygw or MinIO), using
 // OBJECTSTORE_TEST_BUCKET and AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY.
@@ -100,6 +112,14 @@ var _ = Describe("S3", func() {
 			Expect(objs).To(HaveLen(1))
 			Expect(objs[0].Key).To(Equal("db/0009/a.ltx"))
 			Expect(objs[0].LastModified).NotTo(BeZero())
+
+			// Stores without conditional writes overwrite instead of failing.
+			key := fmt.Sprintf("cond/%d", time.Now().UnixNano())
+			Expect(s.PutIfAbsent(ctx, key, []byte("first"))).To(Succeed())
+			if err := s.PutIfAbsent(ctx, key, []byte("second")); err != nil {
+				Expect(errors.Is(err, ErrExists)).To(BeTrue(), err.Error())
+				Expect(s.Get(ctx, key)).To(Equal([]byte("first")))
+			}
 		})
 	}
 })

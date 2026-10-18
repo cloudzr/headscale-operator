@@ -59,6 +59,24 @@ func (m *Memory) Put(_ context.Context, key string, data []byte) error {
 	if m.Err != nil {
 		return m.Err
 	}
+	m.putLocked(key, data)
+	return nil
+}
+
+func (m *Memory) PutIfAbsent(_ context.Context, key string, data []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Err != nil {
+		return m.Err
+	}
+	if _, ok := m.objects[key]; ok {
+		return fmt.Errorf("%s: %w", key, ErrExists)
+	}
+	m.putLocked(key, data)
+	return nil
+}
+
+func (m *Memory) putLocked(key string, data []byte) {
 	if m.objects == nil {
 		m.objects = map[string]memObject{}
 	}
@@ -71,7 +89,6 @@ func (m *Memory) Put(_ context.Context, key string, data []byte) error {
 	}
 	m.objects[key] = memObject{data: slices.Clone(data), modified: now()}
 	m.Puts[key]++
-	return nil
 }
 
 func (m *Memory) Get(_ context.Context, key string) ([]byte, error) {

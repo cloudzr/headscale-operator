@@ -28,8 +28,12 @@ import (
 	"time"
 )
 
-// ErrNotFound is returned by Get when the key does not exist.
-var ErrNotFound = errors.New("object not found")
+var (
+	// ErrNotFound is returned by Get when the key does not exist.
+	ErrNotFound = errors.New("object not found")
+	// ErrExists is returned by PutIfAbsent when the key already exists.
+	ErrExists = errors.New("object already exists")
+)
 
 // Object describes a stored object.
 type Object struct {
@@ -43,6 +47,10 @@ type Object struct {
 type Store interface {
 	// Put writes data to key, replacing any existing object.
 	Put(ctx context.Context, key string, data []byte) error
+	// PutIfAbsent writes data to key only if no object exists there,
+	// returning ErrExists otherwise. Stores without conditional writes fall
+	// back to a plain Put; callers must verify by reading the key back.
+	PutIfAbsent(ctx context.Context, key string, data []byte) error
 	// Get reads key, returning ErrNotFound if it does not exist.
 	Get(ctx context.Context, key string) ([]byte, error)
 	// List returns every object whose key starts with prefix, recursively.

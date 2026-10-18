@@ -119,13 +119,29 @@ func ReadMarker(ctx context.Context, store objectstore.Store) (*Marker, error) {
 // ErrArchiveInUse when another instance owns it. This is what prevents two
 // live instances, or a recovered instance and its source, from interleaving
 // writes in one archive.
+//
+// The marker is written with a conditional put, so of two instances racing
+// for an unclaimed archive only one wins. It is then read back, which also
+// settles the race on stores that don't support conditional writes.
 func Claim(ctx context.Context, store objectstore.Store, owner Marker) error {
 	current, err := ReadMarker(ctx, store)
 	if err != nil {
 		return err
 	}
 	if current == nil {
-		return writeJSON(ctx, store, MarkerKey, owner)
+		data, err := json.MarshalIndent(owner, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := store.PutIfAbsent(ctx, MarkerKey, data); err != nil && !errors.Is(err, objectstore.ErrExists) {
+			return err
+		}
+		if current, err = ReadMarker(ctx, store); err != nil {
+			return err
+		}
+		if current == nil {
+			return fmt.Errorf("%s not found after writing it", MarkerKey)
+		}
 	}
 	if current.UID != owner.UID {
 		return fmt.Errorf("%w: %s", ErrArchiveInUse, current)

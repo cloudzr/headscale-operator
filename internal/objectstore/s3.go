@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -89,6 +90,23 @@ func (s *s3Store) Put(ctx context.Context, key string, data []byte) error {
 	return nil
 }
 
+func (s *s3Store) PutIfAbsent(ctx context.Context, key string, data []byte) error {
+	opts := minio.PutObjectOptions{ContentType: "application/octet-stream"}
+	opts.SetMatchETagExcept("*")
+	_, err := s.client.PutObject(ctx, s.bucket, Join(s.prefix, key), bytes.NewReader(data), int64(len(data)), opts)
+	switch resp := minio.ToErrorResponse(err); {
+	case err == nil:
+		return nil
+	case resp.StatusCode == http.StatusPreconditionFailed || resp.Code == "PreconditionFailed":
+		return fmt.Errorf("%s: %w", key, ErrExists)
+	case resp.StatusCode == http.StatusNotImplemented || resp.Code == "NotImplemented":
+		// Conditional writes are not supported by every S3-compatible store.
+		return s.Put(ctx, key, data)
+	default:
+		return fmt.Errorf("failed to put %s: %w", key, err)
+	}
+}
+
 func (s *s3Store) Get(ctx context.Context, key string) ([]byte, error) {
 	obj, err := s.client.GetObject(ctx, s.bucket, Join(s.prefix, key), minio.GetObjectOptions{})
 	if err != nil {
@@ -133,7 +151,7 @@ func (s *s3Store) wrapErr(key string, err error) error {
 		return fmt.Errorf("%s: %w", key, ErrNotFound)
 	}
 	var resp minio.ErrorResponse
-	if errors.As(err, &resp) && resp.StatusCode == 404 {
+	if errors.As(err, &resp) && resp.StatusCode == http.StatusNotFound {
 		return fmt.Errorf("%s: %w", key, ErrNotFound)
 	}
 	return fmt.Errorf("failed to get %s: %w", key, err)

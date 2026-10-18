@@ -45,7 +45,33 @@ var _ = Describe("Claim", func() {
 		store := &objectstore.Memory{Err: errors.New("unreachable")}
 		Expect(Claim(ctx, store, owner)).To(MatchError(ContainSubstring("unreachable")))
 	})
+
+	It("loses a race against an instance that claimed in between", func() {
+		store := &racingStore{Memory: &objectstore.Memory{}, rival: Marker{Namespace: "ns", Name: "rival", UID: "uid-2"}}
+		err := Claim(ctx, store, owner)
+		Expect(errors.Is(err, ErrArchiveInUse)).To(BeTrue())
+		Expect(err.Error()).To(ContainSubstring("ns/rival"))
+		m, err := ReadMarker(ctx, store)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(m.UID).To(Equal("uid-2"), "the rival's marker is kept")
+	})
 })
+
+// racingStore claims the archive for rival right before the first
+// conditional write, as a concurrent instance would.
+type racingStore struct {
+	*objectstore.Memory
+	rival Marker
+	raced bool
+}
+
+func (s *racingStore) PutIfAbsent(ctx context.Context, key string, data []byte) error {
+	if !s.raced {
+		s.raced = true
+		Expect(writeJSON(ctx, s.Memory, MarkerKey, s.rival)).To(Succeed())
+	}
+	return s.Memory.PutIfAbsent(ctx, key, data)
+}
 
 var _ = Describe("Inspect", func() {
 	ctx := context.Background()
