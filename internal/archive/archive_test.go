@@ -264,7 +264,13 @@ var _ = Describe("Restorer", func() {
 		archiveKey(RoleNoise, "noise-key")
 		stageDB()
 		Expect(restorer().Restore(ctx)).To(Succeed())
+		Expect(os.WriteFile(dbPath, []byte("written by headscale"), 0o644)).To(Succeed())
+
+		By("re-running after litestream staged another copy")
+		stageDB()
 		Expect(restorer().Restore(ctx)).To(Succeed())
+		Expect(dbPath + StagedSuffix).NotTo(BeAnExistingFile())
+		Expect(os.ReadFile(dbPath)).To(Equal([]byte("written by headscale")))
 	})
 
 	It("fails without the noise key and leaves no database behind", func() {

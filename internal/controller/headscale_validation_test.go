@@ -23,7 +23,7 @@ func validObjectStore(path string) headscalev1beta1.ObjectStoreConfig {
 		Region:          "us-east-1",
 		S3Credentials: headscalev1beta1.S3Credentials{
 			AccessKeyID:     &headscalev1beta1.SecretKeyReference{Name: "s3", Key: "id"},
-			SecretAccessKey: &headscalev1beta1.SecretKeyReference{Name: "s3", Key: "secret"},
+			SecretAccessKey: &headscalev1beta1.SecretKeyReference{Name: "s3", Key: testS3SecretKey},
 		},
 	}
 }
@@ -237,7 +237,7 @@ var _ = Describe("Headscale CRD validation for backup and bootstrap", func() {
 			got := &headscalev1beta1.Headscale{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(h), got)).To(Succeed())
 			Expect(got.Spec.Backup.RetentionPolicy).To(Equal("720h"))
-			Expect(got.Spec.Backup.Litestream.Image).To(Equal("litestream/litestream:0.5.17"))
+			Expect(got.Spec.Backup.Litestream.Image).To(Equal(DefaultLitestreamImage), "CRD default and recovery default must match")
 			Expect(got.Spec.Backup.Litestream.SyncInterval).To(Equal("1s"))
 			Expect(got.Spec.Backup.Litestream.SnapshotInterval).To(Equal("24h"))
 			Expect(got.Spec.Bootstrap).To(BeNil())

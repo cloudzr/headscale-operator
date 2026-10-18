@@ -52,7 +52,7 @@ var _ = DescribeTable("StatefulSet rendering without backup (regression guard)",
 			Size:             new(resource.MustParse("1Gi")),
 			StorageClassName: new("local-path"),
 		}
-		h.Spec.ImagePullSecrets = []string{"regcred"}
+		h.Spec.ImagePullSecrets = []string{testPullSecret}
 		h.Spec.ExtraEnv = []corev1.EnvVar{{Name: "TZ", Value: "UTC"}}
 		h.Spec.ExtraVolumes = []corev1.Volume{{Name: "extra", EmptyDir: &corev1.EmptyDirVolumeSource{}}}
 		h.Spec.ExtraVolumeMounts = []corev1.VolumeMount{{Name: "extra", MountPath: "/extra"}}

@@ -69,6 +69,12 @@ func (r *Restorer) Restore(ctx context.Context) error {
 
 	if exists(r.DBPath) {
 		if exists(filepath.Join(dir, RestoredMarkerFile)) {
+			// A re-run Litestream restore may have staged another copy.
+			for _, suffix := range []string{"", "-wal", "-shm"} {
+				if err := os.Remove(staged + suffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
+					return err
+				}
+			}
 			r.Log.Info("Recovery already completed", "path", r.DBPath)
 			return nil
 		}

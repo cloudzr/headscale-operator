@@ -12,4 +12,6 @@ const (
 	routerTag            = "tag:router"
 	testAPIKeySecret     = "test-api-key-secret"
 	testAPIKeySecretPAK  = "test-api-key-secret-pak"
+	testS3SecretKey      = "secret"
+	testPullSecret       = "regcred"
 )

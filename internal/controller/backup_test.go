@@ -338,7 +338,7 @@ var _ = Describe("Headscale backup reconciliation", func() {
 		secret := &corev1.Secret{
 			Name:      credsSecret,
 			Namespace: namespace,
-			Data:      map[string][]byte{"id": []byte("ak"), "secret": []byte("sk")},
+			Data:      map[string][]byte{"id": []byte("ak"), testS3SecretKey: []byte("sk")},
 		}
 		if err := k8sClient.Create(ctx, secret); err != nil && !apierrors.IsAlreadyExists(err) {
 			Expect(err).NotTo(HaveOccurred())

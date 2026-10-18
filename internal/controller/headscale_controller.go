@@ -7,12 +7,12 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -81,7 +81,8 @@ func apiKeySecretNameFor(h *headscalev1beta1.Headscale) string {
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
@@ -181,11 +182,21 @@ func (r *HeadscaleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
-	// Reconcile StatefulSet
-	configHash := computeConfigHash(rendered)
-	if err := r.reconcileStatefulSet(ctx, headscale, view, configHash, backup); err != nil {
-		log.Error(err, "Failed to reconcile StatefulSet")
+	// spec.bootstrap runs once, before the StatefulSet first exists. A
+	// recovery holds the StatefulSet back until the data volume is restored.
+	boot, err := r.reconcileBootstrap(ctx, headscale, view)
+	if err != nil {
+		log.Error(err, "Failed to reconcile bootstrap")
 		return ctrl.Result{}, err
+	}
+
+	// Reconcile StatefulSet
+	if boot.ready {
+		configHash := computeConfigHash(rendered)
+		if err := r.reconcileStatefulSet(ctx, headscale, view, configHash, backup); err != nil {
+			log.Error(err, "Failed to reconcile StatefulSet")
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Reconcile Service
@@ -204,11 +215,15 @@ func (r *HeadscaleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// headscale rejects at startup surfaces here instead of silently looking
 	// healthy.
 	readyCond, requeue := r.computeReadyCondition(ctx, headscale)
+	if !boot.ready {
+		readyCond = bootstrapNotReadyCondition(headscale, boot.cond)
+	}
 	archivingCond := r.computeArchivingCondition(ctx, headscale, &backup)
 	r.emitArchivingEvent(headscale, archivingCond)
 
 	// Update status
-	if err := r.updateStatusWithBackup(ctx, headscale, backup.status, archivingCond, configCond, policyCond, readyCond); err != nil {
+	if err := r.updateStatusWithBackup(ctx, headscale, backup.status, archivingCond,
+		configCond, policyCond, boot.cond, readyCond); err != nil {
 		log.Error(err, "Failed to update Headscale status")
 		return ctrl.Result{}, err
 	}
@@ -459,24 +474,8 @@ func (r *HeadscaleReconciler) statefulSetForHeadscale(h *headscalev1beta1.Headsc
 	metricsPort := extractPort(view.MetricsListenAddr, 9090)
 	grpcPort := extractPort(view.GRPCListenAddr, 50443)
 
-	// Get PVC configuration with defaults
-	pvcSize := resource.NewQuantity(128*1024*1024, resource.BinarySI) // 128Mi default
-	if h.Spec.PersistentVolumeClaim.Size != nil {
-		pvcSize = h.Spec.PersistentVolumeClaim.Size
-	}
-
-	// Build PVC spec
-	pvcSpec := corev1.PersistentVolumeClaimSpec{
-		AccessModes: []corev1.PersistentVolumeAccessMode{
-			corev1.ReadWriteOnce,
-		},
-		Resources: corev1.VolumeResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceStorage: *pvcSize,
-			},
-		},
-		StorageClassName: h.Spec.PersistentVolumeClaim.StorageClassName,
-	}
+	// The recovery bootstrap creates the PVC from the same spec up front.
+	pvcSpec := dataPVCSpecFor(h)
 
 	// Build container list starting with Headscale
 	containers := []corev1.Container{
@@ -634,18 +633,10 @@ func (r *HeadscaleReconciler) statefulSetForHeadscale(h *headscalev1beta1.Headsc
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: h.Name,
-					SecurityContext: &corev1.PodSecurityContext{
-						RunAsUser:    new(int64(65532)),
-						RunAsGroup:   new(int64(65532)),
-						FSGroup:      new(int64(65532)),
-						RunAsNonRoot: new(true),
-						SeccompProfile: &corev1.SeccompProfile{
-							Type: corev1.SeccompProfileTypeRuntimeDefault,
-						},
-					},
-					Containers:       containers,
-					Volumes:          volumes,
-					ImagePullSecrets: buildImagePullSecrets(h.Spec.ImagePullSecrets),
+					SecurityContext:    headscalePodSecurityContext(),
+					Containers:         containers,
+					Volumes:            volumes,
+					ImagePullSecrets:   buildImagePullSecrets(h.Spec.ImagePullSecrets),
 				},
 			},
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
@@ -769,6 +760,20 @@ func (r *HeadscaleReconciler) roleBindingForHeadscale(h *headscalev1beta1.Headsc
 	}
 }
 
+// headscalePodSecurityContext is shared by the headscale pod and the recovery
+// Job, so recovered files are owned by the user headscale runs as.
+func headscalePodSecurityContext() *corev1.PodSecurityContext {
+	return &corev1.PodSecurityContext{
+		RunAsUser:    new(int64(65532)),
+		RunAsGroup:   new(int64(65532)),
+		FSGroup:      new(int64(65532)),
+		RunAsNonRoot: new(true),
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
+	}
+}
+
 // buildImagePullSecrets converts a list of secret names to LocalObjectReferences
 func buildImagePullSecrets(secretNames []string) []corev1.LocalObjectReference {
 	if len(secretNames) == 0 {
@@ -798,6 +803,7 @@ func (r *HeadscaleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&headscalev1beta1.Headscale{}).
 		Owns(&appsv1.StatefulSet{}).
+		Owns(&batchv1.Job{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.ServiceAccount{}).
