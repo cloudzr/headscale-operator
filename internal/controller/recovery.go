@@ -89,12 +89,23 @@ func (r *HeadscaleReconciler) reconcileBootstrap(ctx context.Context, h *headsca
 		return bootstrapResult{cond: newCondition(h, bootstrappedConditionType, metav1.ConditionTrue, prev.Reason, prev.Message), ready: true}, nil
 	}
 
-	// A StatefulSet means the instance already runs on its own data: every
-	// installation that predates spec.bootstrap ends up here.
+	// A StatefulSet means the instance already runs on its own data. The
+	// reason is derived from the spec rather than the previous condition, so
+	// a reconcile working from a stale cache reports the same outcome.
 	err := r.Get(ctx, types.NamespacedName{Name: h.Name, Namespace: h.Namespace}, &appsv1.StatefulSet{})
 	switch {
 	case err == nil:
-		return done("NotRequired", "The instance already has its data")
+		switch {
+		case h.Spec.Bootstrap == nil:
+			// Every installation that predates spec.bootstrap ends up here.
+			return done("NotRequired", "The instance already has its data")
+		case h.Spec.Bootstrap.Recovery != nil:
+			// bootstrap cannot be added to an existing instance, and the
+			// StatefulSet is only created once the recovery succeeded.
+			return done("Recovered", recoveredMessage(h))
+		default:
+			return done("NewInstance", "Headscale initializes an empty instance on first start")
+		}
 	case !apierrors.IsNotFound(err):
 		return bootstrapResult{}, err
 	}
@@ -175,17 +186,14 @@ func (r *HeadscaleReconciler) reconcileBootstrap(ctx context.Context, h *headsca
 // kept for inspection and retried when the user deletes it.
 func (r *HeadscaleReconciler) observeRecoveryJob(ctx context.Context, h *headscalev1beta1.Headscale, job *batchv1.Job) (bootstrapResult, error) {
 	recovery := h.Spec.Bootstrap.Recovery
-	source := recovery.Source
-	if s := externalBackupFor(h, recovery.Source); s != nil {
-		source = s.ObjectStore.DestinationPath
-	}
+	source := recoverySourceDescription(h)
 
 	switch {
 	case jobHasCondition(job, batchv1.JobComplete):
 		if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); client.IgnoreNotFound(err) != nil {
 			return bootstrapResult{}, err
 		}
-		msg := fmt.Sprintf("Recovered from %s%s", source, targetDescription(recovery))
+		msg := recoveredMessage(h)
 		r.event(h, corev1.EventTypeNormal, "RecoveryCompleted", msg)
 		return bootstrapResult{cond: newCondition(h, bootstrappedConditionType, metav1.ConditionTrue, "Recovered", msg), ready: true}, nil
 
@@ -239,6 +247,18 @@ func externalBackupFor(h *headscalev1beta1.Headscale, name string) *headscalev1b
 		}
 	}
 	return nil
+}
+
+// recoverySourceDescription names the recovery source for messages.
+func recoverySourceDescription(h *headscalev1beta1.Headscale) string {
+	if s := externalBackupFor(h, h.Spec.Bootstrap.Recovery.Source); s != nil {
+		return s.ObjectStore.DestinationPath
+	}
+	return h.Spec.Bootstrap.Recovery.Source
+}
+
+func recoveredMessage(h *headscalev1beta1.Headscale) string {
+	return fmt.Sprintf("Recovered from %s%s", recoverySourceDescription(h), targetDescription(h.Spec.Bootstrap.Recovery))
 }
 
 func targetDescription(recovery *headscalev1beta1.BootstrapRecovery) string {

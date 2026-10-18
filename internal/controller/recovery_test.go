@@ -342,6 +342,18 @@ var _ = Describe("Headscale bootstrap reconciliation", func() {
 		By("never recovering again")
 		reconcileOnce()
 		Expect(exists(&batchv1.Job{}, name+"-full-recovery")).To(BeFalse())
+
+		By("keeping the Recovered outcome when reconciling from a stale cache")
+		h = getHeadscale()
+		meta.SetStatusCondition(&h.Status.Conditions, metav1.Condition{
+			Type: bootstrappedConditionType, Status: metav1.ConditionFalse, Reason: "RecoveryRunning", Message: "stale",
+		})
+		Expect(k8sClient.Status().Update(ctx, h)).To(Succeed())
+		reconcileOnce()
+		cond = condition(bootstrappedConditionType)
+		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		Expect(cond.Reason).To(Equal("Recovered"))
+		Expect(exists(&batchv1.Job{}, name+"-full-recovery")).To(BeFalse())
 	})
 
 	It("reports a failed recovery and retries when the Job is deleted", func() {
