@@ -16,6 +16,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -658,6 +659,44 @@ var _ = Describe("Headscale backup reconciliation", func() {
 		Expect(getStatefulSet().Spec.Template.Spec.InitContainers).To(HaveLen(2))
 	})
 
+	It("keeps the Litestream ConfigMap until the StatefulSet no longer mounts it", func() {
+		create(backupConfigJSON, backupSpec("s3://bucket/cm-order"))
+		reconcileOnce()
+		Expect(litestreamConfigMapExists()).To(BeTrue())
+
+		updateSpec(func(h *headscalev1beta1.Headscale) { h.Spec.Backup = nil })
+		r.Client = &failingApplyClient{Client: k8sClient, kind: "StatefulSet"}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key()})
+		Expect(err).To(HaveOccurred())
+		Expect(getStatefulSet().Spec.Template.Spec.Volumes).To(ContainElement(HaveField("Name", litestreamConfigVolumeName)))
+		Expect(litestreamConfigMapExists()).To(BeTrue(), "the pod template still mounts it")
+
+		r.Client = k8sClient
+		reconcileOnce()
+		Expect(litestreamConfigMapExists()).To(BeFalse())
+	})
+
+	It("ignores a terminating pod when checking the sidecars", func() {
+		create(backupConfigJSON, backupSpec("s3://bucket/terminating"))
+		reconcileOnce()
+		runningPod()
+		pod := &corev1.Pod{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-0", Namespace: namespace}, pod)).To(Succeed())
+		pod.Finalizers = []string{"test.headscale.infrado.cloud/hold"}
+		Expect(k8sClient.Update(ctx, pod)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, pod)).To(Succeed())
+		DeferCleanup(func() {
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), pod)).To(Succeed())
+			pod.Finalizers = nil
+			Expect(k8sClient.Update(ctx, pod)).To(Succeed())
+		})
+
+		seedArchive(archive.RoleNoise, archive.RoleDERP)
+		heartbeat(time.Now())
+		reconcileOnce()
+		Expect(archivingCondition().Reason).To(Equal("SidecarNotReady"))
+	})
+
 	It("keeps archiving through an outage once claimed", func() {
 		create(backupConfigJSON, backupSpec("s3://bucket/later-outage"))
 		reconcileOnce()
@@ -688,3 +727,17 @@ var _ = Describe("Headscale watch", func() {
 		Expect(update(func(h *headscalev1beta1.Headscale) { h.DeletionTimestamp = &metav1.Time{Time: time.Now()} })).To(BeTrue())
 	})
 })
+
+// failingApplyClient fails server-side applies of one kind, as an API server
+// rejecting the update would.
+type failingApplyClient struct {
+	client.Client
+	kind string
+}
+
+func (c *failingApplyClient) Apply(ctx context.Context, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+	if k, ok := obj.(interface{ GetKind() string }); ok && k.GetKind() == c.kind {
+		return errors.New("apply rejected")
+	}
+	return c.Client.Apply(ctx, obj, opts...)
+}

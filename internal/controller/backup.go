@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -505,12 +506,12 @@ func (r *HeadscaleReconciler) secretValue(ctx context.Context, namespace string,
 	return string(value), nil
 }
 
-// reconcileLitestreamConfigMap applies the Litestream configuration while
-// the sidecars run and removes it otherwise.
-func (r *HeadscaleReconciler) reconcileLitestreamConfigMap(ctx context.Context, h *headscalev1beta1.Headscale, state backupState) error {
+// applyLitestreamConfigMap applies the Litestream configuration while the
+// sidecars run. It is called before the StatefulSet is applied, so the pod
+// never mounts a ConfigMap that doesn't exist yet.
+func (r *HeadscaleReconciler) applyLitestreamConfigMap(ctx context.Context, h *headscalev1beta1.Headscale, state backupState) error {
 	if state.plan == nil {
-		cm := &corev1.ConfigMap{Name: litestreamConfigMapNameFor(h), Namespace: h.Namespace}
-		return client.IgnoreNotFound(r.Delete(ctx, cm))
+		return nil
 	}
 	return r.applyResource(ctx, h, &corev1.ConfigMap{
 		Name:      litestreamConfigMapNameFor(h),
@@ -518,6 +519,17 @@ func (r *HeadscaleReconciler) reconcileLitestreamConfigMap(ctx context.Context, 
 		Labels:    labelsForHeadscale(h.Name),
 		Data:      map[string]string{litestreamConfigFile: string(state.litestreamConfig)},
 	})
+}
+
+// deleteLitestreamConfigMap removes the Litestream configuration once the
+// sidecars no longer run. It is called after the StatefulSet stopped mounting
+// it: a pod (re)created in between would otherwise wait for it forever.
+func (r *HeadscaleReconciler) deleteLitestreamConfigMap(ctx context.Context, h *headscalev1beta1.Headscale, state backupState) error {
+	if state.plan != nil {
+		return nil
+	}
+	cm := &corev1.ConfigMap{Name: litestreamConfigMapNameFor(h), Namespace: h.Namespace}
+	return client.IgnoreNotFound(r.Delete(ctx, cm))
 }
 
 // computeArchivingCondition inspects the archive and the sidecars and fills
@@ -601,15 +613,19 @@ func replicationProblem(h *headscalev1beta1.Headscale, hb *archive.Heartbeat, no
 }
 
 // stoppedBackupSidecars returns the backup sidecars that are not running in
-// the instance's pod.
+// the instance's pod. A terminating pod (during a roll) doesn't count.
 func (r *HeadscaleReconciler) stoppedBackupSidecars(ctx context.Context, h *headscalev1beta1.Headscale) []string {
 	want := []string{litestreamContainerName, backupAgentContainerName}
 	pods := &corev1.PodList{}
-	if err := r.List(ctx, pods, client.InNamespace(h.Namespace), client.MatchingLabels(labelsForHeadscale(h.Name))); err != nil || len(pods.Items) == 0 {
+	if err := r.List(ctx, pods, client.InNamespace(h.Namespace), client.MatchingLabels(labelsForHeadscale(h.Name))); err != nil {
+		return want
+	}
+	i := slices.IndexFunc(pods.Items, func(p corev1.Pod) bool { return p.DeletionTimestamp == nil })
+	if i < 0 {
 		return want
 	}
 	running := map[string]bool{}
-	for _, cs := range pods.Items[0].Status.InitContainerStatuses {
+	for _, cs := range pods.Items[i].Status.InitContainerStatuses {
 		running[cs.Name] = cs.State.Running != nil
 	}
 	var stopped []string

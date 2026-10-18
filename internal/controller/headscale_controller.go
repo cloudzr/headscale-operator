@@ -183,8 +183,8 @@ func (r *HeadscaleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Continuous archiving is opt-in: without spec.backup this is a no-op and
 	// the StatefulSet is rendered exactly as before.
 	backup := r.prepareBackup(ctx, headscale, view)
-	if err := r.reconcileLitestreamConfigMap(ctx, headscale, backup); err != nil {
-		log.Error(err, "Failed to reconcile Litestream ConfigMap")
+	if err := r.applyLitestreamConfigMap(ctx, headscale, backup); err != nil {
+		log.Error(err, "Failed to apply Litestream ConfigMap")
 		return ctrl.Result{}, err
 	}
 
@@ -203,6 +203,10 @@ func (r *HeadscaleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			log.Error(err, "Failed to reconcile StatefulSet")
 			return ctrl.Result{}, err
 		}
+	}
+	if err := r.deleteLitestreamConfigMap(ctx, headscale, backup); err != nil {
+		log.Error(err, "Failed to delete Litestream ConfigMap")
+		return ctrl.Result{}, err
 	}
 
 	// Reconcile Service
