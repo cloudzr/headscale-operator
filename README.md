@@ -560,7 +560,7 @@ With `spec.backup` set, two sidecars run next to Headscale:
 | Sidecar | What it archives | How |
 |---------|------------------|-----|
 | `litestream` | the SQLite database | [Litestream](https://litestream.io) ships every WAL change (each `sync_interval`, 1s by default) plus periodic snapshots |
-| `backup-agent` | `noise.private_key_path` and, with embedded DERP, `derp.server.private_key_path` | uploads each key once (and again only if it changes) with a checksum manifest, and every 30s writes a heartbeat with Litestream's progress |
+| `backup-agent` | `noise.private_key_path` and, with embedded DERP, `derp.server.private_key_path` | uploads each key once with a checksum manifest, and again only if it changes or disappears from the archive, and every 30s writes a heartbeat with Litestream's progress |
 
 The private keys matter as much as the database: the noise key **is the server's identity**. A database restored without it gives the server a new identity, and every client has to re-register. Archiving both keeps one archive self-sufficient for a recovery:
 
