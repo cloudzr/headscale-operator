@@ -273,6 +273,29 @@ var _ = Describe("Restorer", func() {
 		Expect(os.ReadFile(dbPath)).To(Equal([]byte("written by headscale")))
 	})
 
+	It("completes a recovery interrupted after the database was moved into place", func() {
+		archiveKey(RoleNoise, "noise-key")
+		stageDB()
+		Expect(restorer().Restore(ctx)).To(Succeed())
+
+		By("simulating a crash before the staged copies were cleaned up")
+		stageDB()
+		Expect(restorer().Restore(ctx)).To(Succeed())
+		Expect(os.ReadFile(dbPath)).To(Equal([]byte("sqlite")))
+	})
+
+	It("completes a recovery interrupted before the database was moved into place", func() {
+		archiveKey(RoleNoise, "noise-key")
+		stageDB()
+		marker := filepath.Join(dir, RestoredMarkerFile)
+		Expect(os.WriteFile(marker, []byte(`{}`), 0o600)).To(Succeed())
+		Expect(os.WriteFile(keys[0].Path, []byte("noise-key"), 0o600)).To(Succeed())
+
+		Expect(restorer().Restore(ctx)).To(Succeed())
+		Expect(os.ReadFile(dbPath)).To(Equal([]byte("sqlite")))
+		Expect(os.ReadFile(keys[0].Path)).To(Equal([]byte("noise-key")))
+	})
+
 	It("fails without the noise key and leaves no database behind", func() {
 		archiveKey(RoleDERP, "derp-key")
 		stageDB()

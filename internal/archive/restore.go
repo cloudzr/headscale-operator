@@ -35,8 +35,10 @@ const (
 	// StagedSuffix is appended to the database path for the copy Litestream
 	// restores before the Restorer moves it into place.
 	StagedSuffix = ".restoring"
-	// RestoredMarkerFile is written next to the database once a recovery has
-	// completed, which makes re-running a finished recovery a no-op.
+	// RestoredMarkerFile is written next to the database just before the
+	// recovered files are moved into place. A database next to it was put
+	// there by the recovery, which makes re-running it a no-op, even after a
+	// crash halfway through the moves.
 	RestoredMarkerFile = ".headscale-operator-restored"
 )
 
@@ -128,12 +130,9 @@ func (r *Restorer) Restore(ctx context.Context) error {
 	}
 	moves = append(moves, [2]string{staged, r.DBPath})
 
-	for _, m := range moves {
-		if err := os.Rename(m[0], m[1]); err != nil {
-			return fmt.Errorf("failed to move %s into place: %w", m[1], err)
-		}
-	}
-
+	// Record the recovery before moving anything into place: once the
+	// database is there, the marker is what tells a retry that this recovery
+	// put it there rather than finding foreign data.
 	marker, err := json.Marshal(map[string]string{
 		"source":     r.Source,
 		"restoredAt": time.Now().UTC().Format(time.RFC3339),
@@ -143,6 +142,15 @@ func (r *Restorer) Restore(ctx context.Context) error {
 	}
 	if err := writeFileSync(filepath.Join(dir, RestoredMarkerFile), marker, 0o600); err != nil {
 		return err
+	}
+	if err := syncDir(dir); err != nil {
+		return err
+	}
+
+	for _, m := range moves {
+		if err := os.Rename(m[0], m[1]); err != nil {
+			return fmt.Errorf("failed to move %s into place: %w", m[1], err)
+		}
 	}
 	if err := syncDir(dir); err != nil {
 		return err

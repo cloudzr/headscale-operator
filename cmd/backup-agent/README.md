@@ -49,10 +49,9 @@ backup-agent restore \
 
 Runs after `litestream restore -o <db>.restoring` and:
 
-1. refuses to run if a database already exists (unless it completed this recovery before, which makes re-runs a no-op);
+1. refuses to run if a database already exists, unless `.headscale-operator-restored` sits next to it (this recovery put it there, so a re-run is a no-op);
 2. downloads every key in the manifest and verifies its checksum (the noise key is required, the DERP key optional);
-3. moves the keys into place, then the database last, so an interrupted recovery never leaves an initialized-looking volume;
-4. writes `.headscale-operator-restored` next to the database.
+3. writes `.headscale-operator-restored`, then moves the keys into place and the database last. A recovery interrupted at any point can be re-run, and a failed one never leaves an initialized-looking volume.
 
 ## Credentials
 
