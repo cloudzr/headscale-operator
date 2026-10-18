@@ -1177,6 +1177,8 @@ spec:
 			}, 3*time.Minute, 2*time.Second).Should(Succeed())
 		})
 	})
+
+	backupAndRecoverySpecs()
 })
 
 // waitHeadscaleReady blocks until both the Headscale CR reports Ready=True AND

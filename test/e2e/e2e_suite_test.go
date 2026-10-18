@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -18,6 +19,8 @@ import (
 var (
 	// managerImage is the manager image to be built and loaded for testing.
 	managerImage = "example.com/headscale-operator:v0.0.1"
+	// backupAgentImage is the backup-agent image to be built and loaded for testing.
+	backupAgentImage = "example.com/headscale-operator/backup-agent:v0.0.1"
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
 )
@@ -35,6 +38,8 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
+	ensureIsolatedCluster()
+
 	By("building the manager image")
 	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
 	_, err := utils.Run(cmd)
@@ -46,6 +51,15 @@ var _ = BeforeSuite(func() {
 	err = utils.LoadImageToKindClusterWithName(managerImage)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
 
+	By("building the backup-agent image")
+	cmd = exec.Command("make", "docker-build-backup-agent", fmt.Sprintf("BACKUP_AGENT_IMG=%s", backupAgentImage))
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the backup-agent image")
+
+	By("loading the backup-agent image on Kind")
+	err = utils.LoadImageToKindClusterWithName(backupAgentImage)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the backup-agent image into Kind")
+
 	configureKubectlKubeRC()
 	setupCertManager()
 })
@@ -53,6 +67,27 @@ var _ = BeforeSuite(func() {
 var _ = AfterSuite(func() {
 	teardownCertManager()
 })
+
+// ensureIsolatedCluster refuses to run against anything but the Kind cluster
+// created for the suite: the suite installs and finally uninstalls the CRDs,
+// which would delete every Headscale resource of a real cluster. Set
+// E2E_ALLOW_ANY_CONTEXT=true when deliberately using another disposable cluster.
+func ensureIsolatedCluster() {
+	if os.Getenv("E2E_ALLOW_ANY_CONTEXT") == "true" {
+		return
+	}
+	cluster := "kind"
+	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
+		cluster = v
+	}
+	output, err := utils.Run(exec.Command("kubectl", "config", "current-context"))
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to read the current kubectl context")
+	current := strings.TrimSpace(output)
+	if current != "kind-"+cluster {
+		Fail(fmt.Sprintf("refusing to run e2e tests against kubectl context %q: expected %q "+
+			"(set E2E_ALLOW_ANY_CONTEXT=true to override for another disposable cluster)", current, "kind-"+cluster))
+	}
+}
 
 // Disable kubectl kuberc by default for test isolation.
 // This prevents local kubectl configurations from affecting test behavior.
