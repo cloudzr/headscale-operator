@@ -274,7 +274,7 @@ spec:
 		})
 
 		AfterAll(func() {
-			for _, name := range []string{origin, "hs-latest", "hs-pitr", "hs-empty", "hs-too-early", "hs-taken"} {
+			for _, name := range []string{origin, "hs-latest", "hs-pitr", "hs-empty", "hs-too-early", "hs-tampered", "hs-taken"} {
 				_, _ = kubectl("delete", "headscale", name, "-n", testNamespace, "--ignore-not-found", "--timeout=60s")
 				_, _ = kubectl("delete", "pvc", "data-"+name+"-0", "-n", testNamespace, "--ignore-not-found", "--timeout=60s")
 			}
@@ -312,7 +312,7 @@ spec:
 			By("finding the database, the keys and the owner marker in the bucket")
 			listing := awsS3Read("ls-origin", "ls", "--recursive", "s3://"+s3Bucket+"/origin/")
 			for _, object := range []string{"origin/db/0009/", "origin/keys/noise.key", "origin/keys/derp.key",
-				"origin/keys/manifest.json", "origin/.headscale-operator.json"} {
+				"origin/keys/manifest.json", "origin/agent/heartbeat.json", "origin/.headscale-operator.json"} {
 				Expect(listing).To(ContainSubstring(object))
 			}
 
@@ -380,15 +380,35 @@ spec:
 			Expect(jsonpath("job", "hs-empty-full-recovery", "{.metadata.name}")).To(BeEmpty())
 		})
 
-		It("reports a failed recovery and keeps headscale stopped", func() {
+		It("refuses a recovery target before the oldest recovery point", func() {
 			kubectlApply(headscaleManifest("hs-too-early", recoveryYAML("origin", "2020-01-01T00:00:00Z")))
 			Eventually(func(g Gomega) {
 				_, reason, message := condition("hs-too-early", "Bootstrapped")
-				g.Expect(reason).To(Equal("RecoveryFailed"), message)
-				g.Expect(message).To(ContainSubstring("litestream-restore"))
-			}, 5*time.Minute, 3*time.Second).Should(Succeed())
+				g.Expect(reason).To(Equal("TargetOutOfRange"), message)
+			}, 2*time.Minute, 2*time.Second).Should(Succeed())
 			Expect(jsonpath("statefulset", "hs-too-early", "{.metadata.name}")).To(BeEmpty())
-			Expect(jsonpath("job", "hs-too-early-full-recovery", "{.metadata.name}")).NotTo(BeEmpty(), "kept for inspection")
+			Expect(jsonpath("job", "hs-too-early-full-recovery", "{.metadata.name}")).To(BeEmpty())
+		})
+
+		It("reports a failed recovery and keeps headscale stopped", func() {
+			By("copying the archive with a tampered noise key")
+			Eventually(func() error {
+				_, err := awsS3("cp-tampered", "cp", "--recursive", "s3://"+s3Bucket+"/origin/", "s3://"+s3Bucket+"/tampered/")
+				return err
+			}, time.Minute, 3*time.Second).Should(Succeed())
+			Eventually(func() error {
+				_, err := awsS3("tamper", "cp", "s3://"+s3Bucket+"/origin/keys/derp.key", "s3://"+s3Bucket+"/tampered/keys/noise.key")
+				return err
+			}, time.Minute, 3*time.Second).Should(Succeed())
+
+			kubectlApply(headscaleManifest("hs-tampered", recoveryYAML("tampered", "")))
+			Eventually(func(g Gomega) {
+				_, reason, message := condition("hs-tampered", "Bootstrapped")
+				g.Expect(reason).To(Equal("RecoveryFailed"), message)
+				g.Expect(message).To(ContainSubstring("checksum mismatch"))
+			}, 5*time.Minute, 3*time.Second).Should(Succeed())
+			Expect(jsonpath("statefulset", "hs-tampered", "{.metadata.name}")).To(BeEmpty())
+			Expect(jsonpath("job", "hs-tampered-full-recovery", "{.metadata.name}")).NotTo(BeEmpty(), "kept for inspection")
 		})
 
 		It("refuses to archive into another instance's archive", func() {
