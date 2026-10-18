@@ -740,6 +740,7 @@ The archive holds Headscale's database and its private keys, which is everything
   ```
 
   Recovery only needs `s3:ListBucket` and `s3:GetObject` on the source prefix.
+- Don't let bucket lifecycle rules expire `<path>/keys/` or `<path>/.headscale-operator.json`. Litestream applies `retention_policy` to the database itself. The keys are written once and never rewritten, so an age-based rule deletes them first. The backup-agent re-uploads a deleted key while the pod runs, and the `KeysNotArchived` reason reports it in the meantime. But an archive whose instance is gone can no longer be recovered with its server identity.
 
 #### Monitoring Backups
 

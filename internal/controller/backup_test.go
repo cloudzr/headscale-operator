@@ -363,7 +363,8 @@ var _ = Describe("Headscale backup reconciliation", func() {
 		store.SetObject("db/0000/0000000000000002-0000000000000002.ltx", []byte("wal"), t0.Add(time.Hour))
 		m := &archive.Manifest{Keys: map[string]archive.KeyEntry{}}
 		for _, role := range withKeys {
-			m.Keys[role] = archive.KeyEntry{SHA256: "x"}
+			store.SetObject(archive.KeyObject(role), []byte("key"), t0)
+			m.Keys[role] = archive.KeyEntry{SHA256: "x", Size: int64(len("key"))}
 		}
 		Expect(archive.WriteManifest(ctx, store, m)).To(Succeed())
 	}

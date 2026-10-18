@@ -113,10 +113,24 @@ var _ = Describe("Inspect", func() {
 
 	It("reports missing keys against the manifest", func() {
 		store := &objectstore.Memory{}
-		Expect(WriteManifest(ctx, store, &Manifest{Keys: map[string]KeyEntry{RoleNoise: {SHA256: "x"}}})).To(Succeed())
+		store.SetObject(KeyObject(RoleNoise), []byte("k"), t0)
+		Expect(WriteManifest(ctx, store, &Manifest{Keys: map[string]KeyEntry{RoleNoise: {SHA256: "x", Size: 1}}})).To(Succeed())
 		in, err := Inspect(ctx, store)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(in.MissingKeys([]string{RoleNoise, RoleDERP})).To(ConsistOf(RoleDERP))
+	})
+
+	It("reports a key as missing when only the manifest lists it", func() {
+		store := &objectstore.Memory{}
+		Expect(WriteManifest(ctx, store, &Manifest{Keys: map[string]KeyEntry{
+			RoleNoise: {SHA256: "x", Size: 1},
+			RoleDERP:  {SHA256: "y", Size: 5},
+		}})).To(Succeed())
+		// The DERP key was truncated or replaced: its size doesn't match.
+		store.SetObject(KeyObject(RoleDERP), []byte("k"), t0)
+		in, err := Inspect(ctx, store)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(in.MissingKeys([]string{RoleNoise, RoleDERP})).To(ConsistOf(RoleNoise, RoleDERP))
 	})
 })
 
@@ -197,6 +211,35 @@ var _ = Describe("KeyArchiver", func() {
 		Expect(store.Puts[KeyObject(RoleNoise)]).To(Equal(2))
 		data, _ := store.Get(ctx, KeyObject(RoleNoise))
 		Expect(string(data)).To(Equal("v2"))
+	})
+
+	It("re-uploads a key deleted from the archive", func() {
+		Expect(os.WriteFile(keys[0].Path, []byte("noise-key"), 0o600)).To(Succeed())
+		a := newArchiver(keys[:1])
+		_, err := a.Sync(ctx)
+		Expect(err).NotTo(HaveOccurred())
+
+		store.Delete(KeyObject(RoleNoise))
+		_, err = a.Sync(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		data, err := store.Get(ctx, KeyObject(RoleNoise))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(data)).To(Equal("noise-key"))
+	})
+
+	It("rewrites a manifest deleted from the archive", func() {
+		Expect(os.WriteFile(keys[0].Path, []byte("noise-key"), 0o600)).To(Succeed())
+		a := newArchiver(keys[:1])
+		_, err := a.Sync(ctx)
+		Expect(err).NotTo(HaveOccurred())
+
+		store.Delete(ManifestKey)
+		_, err = a.Sync(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		m, err := ReadManifest(ctx, store)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(m).NotTo(BeNil())
+		Expect(m.Keys).To(HaveKey(RoleNoise))
 	})
 
 	It("archives only the configured keys", func() {

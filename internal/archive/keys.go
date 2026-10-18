@@ -49,7 +49,9 @@ func ParseKeyFile(s string) (KeyFile, error) {
 
 // KeyArchiver uploads headscale's private keys to the archive. Headscale
 // generates the keys on first start and never rotates them, so the archiver
-// only uploads a key when its checksum differs from the manifest.
+// only uploads a key when it is not archived with the same checksum. The
+// archive is re-read on every sync, so a key or manifest deleted from it (by a
+// bucket lifecycle rule, for example) is uploaded again.
 type KeyArchiver struct {
 	Store objectstore.Store
 	Keys  []KeyFile
@@ -58,22 +60,21 @@ type KeyArchiver struct {
 	Now func() time.Time
 	// Reporter, when set, writes the replication heartbeat on every tick.
 	Reporter *ReplicationReporter
-
-	manifest *Manifest
 }
 
 // Sync uploads every key that exists locally and is not archived with the
 // same checksum. It returns true once all keys are archived.
 func (a *KeyArchiver) Sync(ctx context.Context) (bool, error) {
-	if a.manifest == nil {
-		m, err := ReadManifest(ctx, a.Store)
-		if err != nil {
-			return false, err
-		}
-		if m == nil {
-			m = &Manifest{Keys: map[string]KeyEntry{}}
-		}
-		a.manifest = m
+	manifest, err := ReadManifest(ctx, a.Store)
+	if err != nil {
+		return false, err
+	}
+	if manifest == nil {
+		manifest = &Manifest{Keys: map[string]KeyEntry{}}
+	}
+	keySizes, err := listKeySizes(ctx, a.Store)
+	if err != nil {
+		return false, err
 	}
 
 	done := true
@@ -88,7 +89,7 @@ func (a *KeyArchiver) Sync(ctx context.Context) (bool, error) {
 			return false, fmt.Errorf("failed to read %s key: %w", key.Role, err)
 		}
 		sum := sha256Hex(data)
-		if entry, ok := a.manifest.Keys[key.Role]; ok && entry.SHA256 == sum {
+		if keyArchived(manifest, keySizes, key.Role) && manifest.Keys[key.Role].SHA256 == sum {
 			continue
 		}
 
@@ -97,10 +98,9 @@ func (a *KeyArchiver) Sync(ctx context.Context) (bool, error) {
 		if err := a.Store.Put(ctx, KeyObject(key.Role), data); err != nil {
 			return false, err
 		}
-		a.manifest.Keys[key.Role] = KeyEntry{SHA256: sum, Size: int64(len(data)), UploadedAt: a.now().UTC()}
-		if err := WriteManifest(ctx, a.Store, a.manifest); err != nil {
-			// Force a manifest re-read next time; the key upload is harmless.
-			a.manifest = nil
+		manifest.Keys[key.Role] = KeyEntry{SHA256: sum, Size: int64(len(data)), UploadedAt: a.now().UTC()}
+		if err := WriteManifest(ctx, a.Store, manifest); err != nil {
+			// The key upload is harmless: the next sync re-reads the archive.
 			return false, err
 		}
 		a.Log.Info("Archived private key", "role", key.Role, "sha256", sum)

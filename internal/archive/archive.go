@@ -42,6 +42,8 @@ const (
 	ManifestKey = "keys/manifest.json"
 	// MarkerKey names the Headscale instance that writes to the archive.
 	MarkerKey = ".headscale-operator.json"
+	// keysPrefix holds the archived private keys and their manifest.
+	keysPrefix = "keys/"
 
 	// snapshotPrefix is where Litestream v0.5 stores full snapshots (the
 	// highest compaction level). A recovery needs at least one of them.
@@ -60,7 +62,7 @@ const (
 var ErrArchiveInUse = errors.New("archive is owned by another Headscale instance")
 
 // KeyObject returns the object key holding the private key of role.
-func KeyObject(role string) string { return "keys/" + role + ".key" }
+func KeyObject(role string) string { return keysPrefix + role + ".key" }
 
 // RequiredForRecovery reports whether a recovery must fail without this key.
 func RequiredForRecovery(role string) bool { return role == RoleNoise }
@@ -164,21 +166,48 @@ type Inspection struct {
 	Marker     *Marker
 	// Heartbeat is the backup-agent's latest report, or nil.
 	Heartbeat *Heartbeat
+	// keySizes maps the key objects present in the archive to their size.
+	keySizes map[string]int64
 }
 
-// MissingKeys returns the roles that are not in the manifest.
+// MissingKeys returns the roles that are not archived: absent from the
+// manifest, or whose key object is missing or doesn't match the manifest's
+// size (deleted by a bucket lifecycle rule, for example).
 func (i Inspection) MissingKeys(roles []string) []string {
 	var missing []string
 	for _, role := range roles {
-		if i.Manifest == nil {
-			missing = append(missing, role)
-			continue
-		}
-		if _, ok := i.Manifest.Keys[role]; !ok {
+		if !keyArchived(i.Manifest, i.keySizes, role) {
 			missing = append(missing, role)
 		}
 	}
 	return missing
+}
+
+// keyArchived reports whether the manifest lists role and its key object is
+// in the archive with the recorded size.
+func keyArchived(m *Manifest, keySizes map[string]int64, role string) bool {
+	if m == nil {
+		return false
+	}
+	entry, ok := m.Keys[role]
+	if !ok {
+		return false
+	}
+	size, ok := keySizes[KeyObject(role)]
+	return ok && size == entry.Size
+}
+
+// listKeySizes returns the size of every object under keys/.
+func listKeySizes(ctx context.Context, store objectstore.Store) (map[string]int64, error) {
+	objects, err := store.List(ctx, keysPrefix)
+	if err != nil {
+		return nil, err
+	}
+	sizes := make(map[string]int64, len(objects))
+	for _, obj := range objects {
+		sizes[obj.Key] = obj.Size
+	}
+	return sizes, nil
 }
 
 // Inspect lists the archive and summarizes what can be recovered from it.
@@ -202,6 +231,9 @@ func Inspect(ctx context.Context, store objectstore.Store) (Inspection, error) {
 		}
 	}
 	if in.Manifest, err = ReadManifest(ctx, store); err != nil {
+		return in, err
+	}
+	if in.keySizes, err = listKeySizes(ctx, store); err != nil {
 		return in, err
 	}
 	if in.Marker, err = ReadMarker(ctx, store); err != nil {

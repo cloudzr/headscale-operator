@@ -206,7 +206,8 @@ var _ = Describe("Headscale bootstrap reconciliation", func() {
 		src.SetObject("db/0009/0000000000000001-0000000000000001.ltx", []byte("snapshot"), sourceSnapshotTime)
 		m := &archive.Manifest{Keys: map[string]archive.KeyEntry{}}
 		for _, role := range roles {
-			m.Keys[role] = archive.KeyEntry{SHA256: "x"}
+			src.SetObject(archive.KeyObject(role), []byte("key"), sourceSnapshotTime)
+			m.Keys[role] = archive.KeyEntry{SHA256: "x", Size: int64(len("key"))}
 		}
 		Expect(archive.WriteManifest(ctx, src, m)).To(Succeed())
 	}

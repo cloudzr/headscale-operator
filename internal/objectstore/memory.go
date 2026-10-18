@@ -53,6 +53,14 @@ func (m *Memory) SetObject(key string, data []byte, modified time.Time) {
 	m.objects[key] = memObject{data: slices.Clone(data), modified: modified}
 }
 
+// Delete removes key, simulating an object deleted outside the operator
+// (for example by a bucket lifecycle rule).
+func (m *Memory) Delete(key string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.objects, key)
+}
+
 func (m *Memory) Put(_ context.Context, key string, data []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
