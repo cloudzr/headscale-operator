@@ -4,6 +4,8 @@ IMG ?= controller:latest
 YEAR ?= $(shell date +%Y)
 # API Key Manager image
 APIKEY_MANAGER_IMG ?= apikey-manager:latest
+# Backup agent image
+BACKUP_AGENT_IMG ?= backup-agent:latest
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -118,8 +120,12 @@ build: manifests generate fmt vet ## Build manager binary.
 build-apikey-manager: ## Build API key manager binary.
 	go build -o bin/apikey-manager cmd/apikey-manager/main.go
 
+.PHONY: build-backup-agent
+build-backup-agent: ## Build backup agent binary.
+	go build -o bin/backup-agent cmd/backup-agent/main.go
+
 .PHONY: build-all
-build-all: build build-apikey-manager ## Build all binaries.
+build-all: build build-apikey-manager build-backup-agent ## Build all binaries.
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
@@ -138,8 +144,12 @@ docker-build: ## Build docker image with the manager.
 docker-build-apikey-manager: ## Build docker image with the API key manager.
 	$(CONTAINER_TOOL) build -f Dockerfile.apikey-manager -t ${APIKEY_MANAGER_IMG} .
 
+.PHONY: docker-build-backup-agent
+docker-build-backup-agent: ## Build docker image with the backup agent.
+	$(CONTAINER_TOOL) build -f Dockerfile.backup-agent -t ${BACKUP_AGENT_IMG} .
+
 .PHONY: docker-build-all
-docker-build-all: docker-build docker-build-apikey-manager ## Build all docker images.
+docker-build-all: docker-build docker-build-apikey-manager docker-build-backup-agent ## Build all docker images.
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
@@ -149,8 +159,12 @@ docker-push: ## Push docker image with the manager.
 docker-push-apikey-manager: ## Push docker image with the API key manager.
 	$(CONTAINER_TOOL) push ${APIKEY_MANAGER_IMG}
 
+.PHONY: docker-push-backup-agent
+docker-push-backup-agent: ## Push docker image with the backup agent.
+	$(CONTAINER_TOOL) push ${BACKUP_AGENT_IMG}
+
 .PHONY: docker-push-all
-docker-push-all: docker-push docker-push-apikey-manager ## Push all docker images.
+docker-push-all: docker-push docker-push-apikey-manager docker-push-backup-agent ## Push all docker images.
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:

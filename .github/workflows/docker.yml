@@ -8,6 +8,7 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   APIKEY_MANAGER_IMAGE_NAME: ${{ github.repository }}/apikey-manager
+  BACKUP_AGENT_IMAGE_NAME: ${{ github.repository }}/backup-agent
 
 jobs:
   docker:
@@ -67,3 +68,23 @@ jobs:
         push: true
         tags: ${{ steps.meta-apikey.outputs.tags }}
         labels: ${{ steps.meta-apikey.outputs.labels }}
+
+    - name: Extract metadata for backup-agent
+      id: meta-backup-agent
+      uses: docker/metadata-action@v6
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.BACKUP_AGENT_IMAGE_NAME }}
+        tags: |
+          type=semver,pattern={{raw}}
+          type=semver,pattern=v{{major}}.{{minor}}
+          type=raw,value=latest
+
+    - name: Build and push backup-agent Docker image
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        file: ./Dockerfile.backup-agent
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta-backup-agent.outputs.tags }}
+        labels: ${{ steps.meta-backup-agent.outputs.labels }}
