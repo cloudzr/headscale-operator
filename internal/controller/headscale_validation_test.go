@@ -2,12 +2,15 @@ package controller
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/yaml"
 
 	headscalev1beta1 "github.com/infradohq/headscale-operator/api/v1beta1"
 )
@@ -177,6 +180,22 @@ var _ = Describe("Headscale CRD validation for backup and bootstrap", func() {
 			h.Spec.Backup = &headscalev1beta1.BackupConfig{ObjectStore: store}
 		}, ""),
 	)
+
+	It("accepts every Headscale sample", func() {
+		samples := filepath.Join("..", "..", "config", "samples")
+		files, err := filepath.Glob(filepath.Join(samples, "headscale_v1beta1_headscale_*.yaml"))
+		Expect(err).NotTo(HaveOccurred())
+		files = append(files, filepath.Join(samples, "headscale_v1beta1_headscale.yaml"))
+		Expect(files).To(ContainElement(HaveSuffix("headscale_v1beta1_headscale_recovery.yaml")))
+		for _, file := range files {
+			data, err := os.ReadFile(file)
+			Expect(err).NotTo(HaveOccurred())
+			h := &headscalev1beta1.Headscale{}
+			Expect(yaml.UnmarshalStrict(data, h)).To(Succeed(), file)
+			h.Namespace = namespace
+			Expect(k8sClient.Create(ctx, h, client.DryRunAll)).To(Succeed(), file)
+		}
+	})
 
 	Context("transition rules", func() {
 		var h *headscalev1beta1.Headscale

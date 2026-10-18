@@ -286,7 +286,9 @@ spec:
                       endpoint_url:
                         description: |-
                           EndpointURL overrides the S3 endpoint, for S3-compatible stores
-                          (MinIO, Ceph RGW, Cloudflare R2, ...). Leave empty for AWS S3.
+                          (MinIO, Ceph RGW, Cloudflare R2, ...). Leave empty for AWS S3. The
+                          operator reads the archive too, from its own namespace: for an
+                          in-cluster store use the fully qualified <service>.<namespace>.svc name.
                         maxLength: 512
                         pattern: ^https?://[^/]+/?$
                         type: string
@@ -441,7 +443,9 @@ spec:
                         endpoint_url:
                           description: |-
                             EndpointURL overrides the S3 endpoint, for S3-compatible stores
-                            (MinIO, Ceph RGW, Cloudflare R2, ...). Leave empty for AWS S3.
+                            (MinIO, Ceph RGW, Cloudflare R2, ...). Leave empty for AWS S3. The
+                            operator reads the archive too, from its own namespace: for an
+                            in-cluster store use the fully qualified <service>.<namespace>.svc name.
                           maxLength: 512
                           pattern: ^https?://[^/]+/?$
                           type: string

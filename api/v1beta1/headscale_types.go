@@ -123,7 +123,9 @@ type ObjectStoreConfig struct {
 	DestinationPath string `json:"destination_path"`
 
 	// EndpointURL overrides the S3 endpoint, for S3-compatible stores
-	// (MinIO, Ceph RGW, Cloudflare R2, ...). Leave empty for AWS S3.
+	// (MinIO, Ceph RGW, Cloudflare R2, ...). Leave empty for AWS S3. The
+	// operator reads the archive too, from its own namespace: for an
+	// in-cluster store use the fully qualified <service>.<namespace>.svc name.
 	// +kubebuilder:validation:Pattern=`^https?://[^/]+/?$`
 	// +kubebuilder:validation:MaxLength=512
 	// +optional

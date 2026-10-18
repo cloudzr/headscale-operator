@@ -13,6 +13,7 @@ The Headscale Operator simplifies the deployment and management of Headscale ins
 - **API Key Management**: Automatic API key creation and rotation with configurable expiration
 - **ACL Policy Management**: Declarative auto-approval of subnet routes and exit nodes via the `HeadscaleAutoApprover` CRD
 - **Full Config Support**: `spec.config` is a free-form passthrough to Headscale's `config.yaml` — every key Headscale supports works (database, DERP, DNS/MagicDNS, OIDC, TLS/Let's Encrypt, policy, …), and new/renamed keys in future Headscale releases need no operator change. Headscale validates the config itself at startup; the result is reflected on the `Headscale` status.
+- **Backup and Recovery**: Continuous archiving of the SQLite database and of Headscale's private keys to S3-compatible storage with Litestream, and CNPG-style bootstrap of new instances from an archive (latest or point-in-time)
 - **Observability**: Built-in metrics endpoint for monitoring
 - **Production Ready**: Supports high availability with persistent storage
 
@@ -46,6 +47,16 @@ The Headscale Operator simplifies the deployment and management of Headscale ins
       - [Combining With PreAuth Keys](#combining-with-preauth-keys)
       - [Auto-Approver Examples](#auto-approver-examples)
     - [API Key Management](#api-key-management)
+    - [Backup and Recovery](#backup-and-recovery)
+      - [How It Works](#how-it-works)
+      - [Enabling Continuous Backup](#enabling-continuous-backup)
+      - [Backup Status](#backup-status)
+      - [Recovering an Instance](#recovering-an-instance)
+      - [Safety Guarantees](#safety-guarantees)
+      - [Securing the Archive](#securing-the-archive)
+      - [Monitoring Backups](#monitoring-backups)
+      - [Disaster Recovery Runbook](#disaster-recovery-runbook)
+      - [Limitations](#limitations)
     - [Uninstallation](#uninstallation)
   - [Development](#development)
     - [Building from Source](#building-from-source)
@@ -534,6 +545,222 @@ The secret contains:
 
 For more details on API key management, see [cmd/apikey-manager/README.md](cmd/apikey-manager/README.md).
 
+### Backup and Recovery
+
+The operator can continuously archive a Headscale instance to S3-compatible object storage and create new instances from such an archive. The model follows [CloudNativePG](https://cloudnative-pg.io/documentation/current/backup/):
+
+- `spec.backup` only **writes** to an archive.
+- `spec.bootstrap` decides, **once at creation**, whether an instance starts empty (`new`, the default) or is **recovered** from an archive listed in `spec.external_backups`.
+- Archives in `spec.external_backups` are only ever **read**.
+
+#### How It Works
+
+With `spec.backup` set, two sidecars run next to Headscale:
+
+| Sidecar | What it archives | How |
+|---------|------------------|-----|
+| `litestream` | the SQLite database | [Litestream](https://litestream.io) ships every WAL change (each `sync_interval`, 1s by default) plus periodic snapshots |
+| `backup-agent` | `noise.private_key_path` and, with embedded DERP, `derp.server.private_key_path` | uploads each key once (and again only if it changes) with a checksum manifest |
+
+The private keys matter as much as the database: the noise key **is the server's identity**. A database restored without it gives the server a new identity, and every client has to re-register. Archiving both keeps one archive self-sufficient for a recovery:
+
+```
+s3://<bucket>/<prefix>/
+├── db/                       # Litestream replica of the database
+├── keys/noise.key            # headscale private keys
+├── keys/derp.key
+├── keys/manifest.json        # checksums of the archived keys
+└── .headscale-operator.json  # which Headscale instance owns this archive
+```
+
+Both sidecars are [native sidecars](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/): they start before Headscale and stop after it, so Litestream sees the database from its first write and ships the last writes on shutdown.
+
+**Requirements**
+
+- Kubernetes 1.29 or newer (native sidecars)
+- `replicas: 1` (enforced by the CRD)
+- `database.type: sqlite` with write-ahead logging (Headscale's default), with the database under `/var/lib/headscale`
+- Keys stored outside `/var/lib/headscale` (for example mounted from a Secret) are considered managed by you and are neither archived nor restored
+- The object store must be reachable from the operator as well (it claims and inspects archives). For an in-cluster store, use the fully qualified service name (`<service>.<namespace>.svc`) in `endpoint_url`
+
+#### Enabling Continuous Backup
+
+```yaml
+apiVersion: headscale.infrado.cloud/v1beta1
+kind: Headscale
+metadata:
+  name: headscale
+  namespace: headscale
+spec:
+  # ...
+  backup:
+    object_store:
+      destination_path: s3://my-bucket/headscale/prod   # must not be used by any other instance
+      # endpoint_url: http://minio.minio.svc:9000      # for S3-compatible stores; in-cluster: use the FQDN
+      region: eu-central-1
+      s3_credentials:
+        access_key_id:
+          name: headscale-backup-s3
+          key: access-key-id
+        secret_access_key:
+          name: headscale-backup-s3
+          key: secret-access-key
+        # inherit_from_iam_role: true   # use IRSA / pod identity instead of static keys
+    retention_policy: 720h        # how long recovery points are kept (default 30 days)
+    litestream:
+      sync_interval: 1s           # bounds the data loss window (default 1s)
+      snapshot_interval: 24h      # full snapshots; shorter means faster restores (default 24h)
+      # image: litestream/litestream:0.5.17
+      # resources: {...}
+    # agent:
+    #   image: ...                # defaults to the backup-agent image of the operator release
+    #   resources: {...}
+```
+
+Enabling (or disabling) backup on an existing instance changes its pod template, so the Headscale pod restarts once. Instances without `spec.backup` are left exactly as they are.
+
+A complete example is in [config/samples/headscale_v1beta1_headscale_backup.yaml](config/samples/headscale_v1beta1_headscale_backup.yaml).
+
+#### Backup Status
+
+```sh
+kubectl get headscale -n headscale
+# NAME        READY   ARCHIVING   AGE
+# headscale   True    True        30d
+
+kubectl get headscale headscale -n headscale -o jsonpath='{.status.backup}' | jq
+# {
+#   "destination_path": "s3://my-bucket/headscale/prod",
+#   "first_recoverability_point": "2026-10-01T08:00:00Z",
+#   "last_successful_backup": "2026-10-18T12:00:01Z",
+#   "keys_archived": true
+# }
+```
+
+The `ContinuousArchiving` condition is `True` once the sidecars run, a base snapshot is in the archive and all keys are archived. Otherwise its reason says why:
+
+| Reason | Meaning |
+|--------|---------|
+| `SidecarNotReady` | The `litestream` or `backup-agent` sidecar is not running yet |
+| `NoBaseSnapshot` | Waiting for Litestream to upload the first snapshot |
+| `KeysNotArchived` | Waiting for Headscale to generate, or the agent to upload, a private key |
+| `CredentialsMissing` | The credentials Secret or key does not exist |
+| `ObjectStoreUnreachable` | The archive could not be read or written |
+| `ArchiveInUse` | Another Headscale instance owns `destination_path` |
+| `UnsupportedDatabase`, `WALDisabled`, `MissingSetting`, `UnsupportedPath`, `PortConflict` | `spec.config` cannot be archived (see Requirements) |
+
+Backup problems never take Headscale down: the sidecars have no readiness probes and keep retrying, and once an archive is claimed, credential or object store errors are only reported, never acted upon.
+
+#### Recovering an Instance
+
+Recovery always creates a **new** Headscale resource, like a CNPG cluster bootstrapped from a backup:
+
+```yaml
+apiVersion: headscale.infrado.cloud/v1beta1
+kind: Headscale
+metadata:
+  name: headscale-restored
+  namespace: headscale
+spec:
+  # ... same config as the source instance ...
+  bootstrap:
+    recovery:
+      source: prod
+      recovery_target:                       # omit to recover the latest state
+        target_time: "2026-10-10T08:00:00Z"
+  external_backups:
+    - name: prod
+      object_store:
+        destination_path: s3://my-bucket/headscale/prod
+        region: eu-central-1
+        s3_credentials: { ... }
+  backup:                                    # optional: keep archiving, to a new path
+    object_store:
+      destination_path: s3://my-bucket/headscale/prod-v2
+      # ...
+```
+
+Before Headscale first starts, the operator:
+
+1. checks the source: it must contain a database snapshot and the noise key;
+2. creates the data PVC `data-<name>-0` exactly as the StatefulSet would;
+3. runs the Job `<name>-full-recovery`: `litestream restore` (latest, or as of `target_time`) to a staging file, then the backup-agent verifies the keys against the manifest and moves the keys and finally the database into place;
+4. deletes the Job and creates the StatefulSet.
+
+Progress is reported on the `Bootstrapped` condition (and `Ready` is `False` with reason `Bootstrapping` meanwhile):
+
+| Reason | Meaning |
+|--------|---------|
+| `NewInstance` | `bootstrap.new` or no bootstrap: Headscale initializes an empty instance |
+| `NotRequired` | The instance already had its data (all instances created before this feature) |
+| `RecoveryRunning` | The recovery Job is running |
+| `Recovered` | Recovery completed; the message names the source and target time |
+| `RecoveryFailed` | The Job failed; the message carries the Litestream or agent error. The Job is kept for inspection: **delete it to retry** |
+| `NoRecoverableBackup`, `KeysMissing` | The source has no snapshot, or no noise key |
+| `PVCAlreadyExists` | `data-<name>-0` already exists; recovery never writes into existing data. Delete the PVC to recover into a fresh volume |
+
+`bootstrap` is immutable: it cannot be added to, changed on or removed from an existing resource.
+
+A complete example is in [config/samples/headscale_v1beta1_headscale_recovery.yaml](config/samples/headscale_v1beta1_headscale_recovery.yaml).
+
+#### Safety Guarantees
+
+- **One writer per archive.** The first instance archiving to a path records itself in `.headscale-operator.json`; any other instance pointed at it reports `ArchiveInUse` and does not archive.
+- **The recovery source is read-only.** The CRD rejects a `backup.object_store.destination_path` that equals, contains or is contained in the recovery source path (on the same endpoint), so a recovered instance always starts a fresh archive.
+- **Existing data is never overwritten.** Recovery only writes into a PVC it created itself, and the agent refuses to replace an existing database.
+- **No silent identity change.** A recovery fails rather than proceed without the noise key. (The DERP key is optional: clients learn a new one from the DERP map.)
+- **Atomic restores.** The database is moved into place last, so a failed or interrupted recovery never leaves a volume that looks initialized.
+
+#### Securing the Archive
+
+The archive holds Headscale's database and its private keys, which is everything needed to impersonate the server. Treat the bucket accordingly:
+
+- Enable server-side encryption on the bucket (SSE-S3 or SSE-KMS). Litestream 0.5 has no client-side encryption.
+- Give each instance credentials limited to its prefix. For AWS S3:
+
+  ```json
+  {
+    "Version": "2012-10-17",
+    "Statement": [
+      {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": "arn:aws:s3:::my-bucket",
+       "Condition": {"StringLike": {"s3:prefix": ["headscale/prod/*"]}}},
+      {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+       "Resource": "arn:aws:s3:::my-bucket/headscale/prod/*"}
+    ]
+  }
+  ```
+
+  Recovery only needs `s3:ListBucket` and `s3:GetObject` on the source prefix.
+
+#### Monitoring Backups
+
+While backup is enabled, the `<name>-metrics` Service also exposes Litestream's Prometheus metrics on port `9091` (named `litestream`). Useful alerts:
+
+```yaml
+- alert: HeadscaleBackupSyncErrors
+  expr: increase(litestream_sync_error_count[10m]) > 0
+- alert: HeadscaleBackupWALGrowing    # WAL keeps growing while uploads fail
+  expr: litestream_wal_size > 64 * 1024 * 1024
+```
+
+The `ContinuousArchiving` condition and the `Warning` events on the Headscale resource report the same problems for clusters without Prometheus.
+
+#### Disaster Recovery Runbook
+
+1. Make sure the old instance is gone or stopped, so it no longer serves clients.
+2. Create a new Headscale resource with the same `spec.config`, `bootstrap.recovery` pointing at the archive, and `backup` pointing at a **new** path.
+3. Wait for `Bootstrapped=True` and `Ready=True`:
+   `kubectl wait headscale/<name> --for=condition=Ready --timeout=10m`
+4. Point `server_url`'s DNS (or your Ingress) at the new instance. Clients reconnect with their existing node keys, because the server identity was recovered.
+5. Rehearse this regularly: a backup is only as good as the last successful restore.
+
+#### Limitations
+
+- Only the SQLite backend is supported. For PostgreSQL, use your database's own backup tooling (for example CloudNativePG).
+- The sidecar images must be pullable for the Headscale pod to start (as for any container of the pod).
+- During a long object store outage the WAL file keeps growing, since Litestream cannot ship it.
+- Point-in-time recovery precision is bounded by `sync_interval`.
+
 ### Uninstallation
 
 Delete the Headscale instance:
@@ -559,8 +786,9 @@ make build
 # Run tests
 make test
 
-# Build Docker image
+# Build Docker images (operator, apikey-manager and backup-agent)
 make docker-build IMG=<registry>/headscale-operator:tag
+make docker-build-backup-agent BACKUP_AGENT_IMG=<registry>/headscale-operator/backup-agent:tag
 ```
 
 ### Running Locally
@@ -592,8 +820,21 @@ make deploy IMG=<registry>/headscale-operator:tag
 # Run unit tests
 make test
 
-# Run end-to-end tests
+# Run end-to-end tests (creates and deletes a dedicated Kind cluster)
 make test-e2e
+```
+
+The end-to-end tests install and finally uninstall the CRDs, which deletes every `Headscale` resource of the cluster they run against. They therefore refuse to run unless the current kubectl context is the Kind cluster created for them (`kind-headscale-operator-test-e2e`). Keep your regular kubeconfig out of the way, for example:
+
+```sh
+KUBECONFIG=$(mktemp) make test-e2e
+```
+
+The object store tests can run against any S3-compatible server:
+
+```sh
+OBJECTSTORE_TEST_ENDPOINT=http://127.0.0.1:7070 OBJECTSTORE_TEST_BUCKET=test \
+  AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... go test ./internal/objectstore/
 ```
 
 ## Contributing

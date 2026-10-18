@@ -12,6 +12,16 @@ image:
   tag: ""
 
 imagePullSecrets: []
+
+# Image of the backup-agent sidecar used by Headscale instances with
+# spec.backup (and by recovery Jobs). A Headscale can override it with
+# spec.backup.agent.image.
+backupAgent:
+  image:
+    repository: ghcr.io/infradohq/headscale-operator/backup-agent
+    # Overrides the image tag whose default is the chart appVersion.
+    tag: ""
+
 nameOverride: ""
 fullnameOverride: ""
 

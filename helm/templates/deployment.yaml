@@ -42,6 +42,7 @@ spec:
         - /manager
         args:
           {{- toYaml .Values.args | nindent 10 }}
+          - --backup-agent-image={{ .Values.backupAgent.image.repository }}:{{ .Values.backupAgent.image.tag | default .Chart.AppVersion }}
         ports:
         - name: health
           containerPort: 8081

@@ -1,0 +1,57 @@
+# Continuous backup of a Headscale instance to S3-compatible object storage.
+#
+# Not part of kustomization.yaml: it needs a bucket and credentials. Apply it
+# on its own after adjusting the object store settings:
+#
+#   kubectl create secret generic headscale-backup-s3 \
+#     --from-literal=access-key-id=... --from-literal=secret-access-key=...
+#   kubectl apply -f config/samples/headscale_v1beta1_headscale_backup.yaml
+#
+# Litestream streams the SQLite database (every sync_interval) and the
+# backup-agent archives headscale's private keys next to it, so the archive
+# alone is enough to recover the server with its identity.
+apiVersion: headscale.infrado.cloud/v1beta1
+kind: Headscale
+metadata:
+  labels:
+    app.kubernetes.io/name: headscale-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: headscale-sample
+spec:
+  version: "v0.29.4"
+  replicas: 1          # backup requires a single replica
+  config:
+    server_url: http://vpn.headscale.local
+    noise:
+      private_key_path: /var/lib/headscale/noise_private.key
+    prefixes:
+      v4: 100.64.0.0/10
+      v6: fd7a:115c:a1e0::/48
+    derp:
+      urls:
+        - https://controlplane.tailscale.com/derpmap/default
+    database:
+      type: sqlite     # backup supports SQLite (headscale's default) only
+      sqlite:
+        path: /var/lib/headscale/db.sqlite
+    dns:
+      magic_dns: false
+      override_local_dns: false
+  backup:
+    object_store:
+      # Must not be used by any other Headscale instance.
+      destination_path: s3://my-bucket/headscale/prod
+      # endpoint_url: https://minio.example.com   # for S3-compatible stores
+      region: eu-central-1
+      s3_credentials:
+        access_key_id:
+          name: headscale-backup-s3
+          key: access-key-id
+        secret_access_key:
+          name: headscale-backup-s3
+          key: secret-access-key
+        # inherit_from_iam_role: true             # IRSA / pod identity instead of keys
+    retention_policy: 720h       # keep 30 days of recovery points
+    litestream:
+      sync_interval: 1s          # bounds the data loss window
+      snapshot_interval: 24h     # shorter means faster restores

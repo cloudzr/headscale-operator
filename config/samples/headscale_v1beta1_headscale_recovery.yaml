@@ -1,0 +1,69 @@
+# Create a new Headscale instance from the archive of another one.
+#
+# Not part of kustomization.yaml: it needs an existing archive. The recovery
+# runs once, before headscale first starts, in a Job named
+# <name>-full-recovery. Watch it with:
+#
+#   kubectl get headscale headscale-restored -o jsonpath='{.status.conditions[?(@.type=="Bootstrapped")]}'
+#
+# The new instance keeps the source's noise key, so clients reconnect without
+# re-registering once traffic is moved to it.
+apiVersion: headscale.infrado.cloud/v1beta1
+kind: Headscale
+metadata:
+  labels:
+    app.kubernetes.io/name: headscale-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: headscale-restored
+spec:
+  version: "v0.29.4"
+  replicas: 1
+  config:
+    server_url: http://vpn.headscale.local
+    noise:
+      private_key_path: /var/lib/headscale/noise_private.key
+    prefixes:
+      v4: 100.64.0.0/10
+      v6: fd7a:115c:a1e0::/48
+    derp:
+      urls:
+        - https://controlplane.tailscale.com/derpmap/default
+    database:
+      type: sqlite
+      sqlite:
+        path: /var/lib/headscale/db.sqlite
+    dns:
+      magic_dns: false
+      override_local_dns: false
+  # bootstrap is evaluated once, at creation, and is immutable afterwards.
+  bootstrap:
+    recovery:
+      source: prod
+      # Omit recovery_target to recover the latest state.
+      recovery_target:
+        target_time: "2026-10-10T08:00:00Z"
+  # Archives listed here are only ever read.
+  external_backups:
+    - name: prod
+      object_store:
+        destination_path: s3://my-bucket/headscale/prod
+        region: eu-central-1
+        s3_credentials:
+          access_key_id:
+            name: headscale-backup-s3
+            key: access-key-id
+          secret_access_key:
+            name: headscale-backup-s3
+            key: secret-access-key
+  # A recovered instance archives to a new path: it must not overlap the source.
+  backup:
+    object_store:
+      destination_path: s3://my-bucket/headscale/prod-v2
+      region: eu-central-1
+      s3_credentials:
+        access_key_id:
+          name: headscale-backup-s3
+          key: access-key-id
+        secret_access_key:
+          name: headscale-backup-s3
+          key: secret-access-key
