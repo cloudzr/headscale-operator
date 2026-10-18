@@ -36,6 +36,10 @@ type HeadscaleReconciler struct {
 	// BackupAgentImage is the default backup-agent image, normally matching
 	// the operator release. spec.backup.agent.image overrides it.
 	BackupAgentImage string
+	// APIReader reads from the API server, bypassing the cache, where a
+	// stale read would be harmful (the recovery bootstrap). Defaults to the
+	// client.
+	APIReader client.Reader
 	// NewObjectStore builds archive clients. Defaults to objectstore.NewS3;
 	// tests inject an in-memory store.
 	NewObjectStore func(objectstore.Config) (objectstore.Store, error)

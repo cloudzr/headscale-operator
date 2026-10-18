@@ -56,6 +56,14 @@ const (
 	recoveryForAnnotation = "headscale.infrado.cloud/recovery-for"
 
 	recoveryJobBackoffLimit int32 = 2
+	// recoveryJobDeadline fails a recovery that hangs (for example on an
+	// unreachable endpoint) instead of reporting RecoveryRunning forever.
+	recoveryJobDeadline int64 = 3600
+
+	// recoveryTargetTolerance accepts a target_time slightly before the oldest
+	// snapshot's upload time: a snapshot is stamped when Litestream takes it,
+	// which precedes its upload.
+	recoveryTargetTolerance = 5 * time.Minute
 )
 
 func recoveryJobNameFor(h *headscalev1beta1.Headscale) string { return h.Name + "-full-recovery" }
@@ -89,23 +97,18 @@ func (r *HeadscaleReconciler) reconcileBootstrap(ctx context.Context, h *headsca
 		return bootstrapResult{cond: newCondition(h, bootstrappedConditionType, metav1.ConditionTrue, prev.Reason, prev.Message), ready: true}, nil
 	}
 
-	// A StatefulSet means the instance already runs on its own data. The
-	// reason is derived from the spec rather than the previous condition, so
-	// a reconcile working from a stale cache reports the same outcome.
-	err := r.Get(ctx, types.NamespacedName{Name: h.Name, Namespace: h.Namespace}, &appsv1.StatefulSet{})
+	// Until the outcome is recorded, the StatefulSet and the Job are read
+	// from the API server: the cache can lag behind a recovery that just
+	// completed (Job deleted, StatefulSet created) and must never make this
+	// start a second one against the live volume.
+	reader := r.uncachedReader()
+
+	// A StatefulSet means the instance already runs on its own data.
+	sts := &appsv1.StatefulSet{}
+	err := reader.Get(ctx, types.NamespacedName{Name: h.Name, Namespace: h.Namespace}, sts)
 	switch {
 	case err == nil:
-		switch {
-		case h.Spec.Bootstrap == nil:
-			// Every installation that predates spec.bootstrap ends up here.
-			return done("NotRequired", "The instance already has its data")
-		case h.Spec.Bootstrap.Recovery != nil:
-			// bootstrap cannot be added to an existing instance, and the
-			// StatefulSet is only created once the recovery succeeded.
-			return done("Recovered", recoveredMessage(h))
-		default:
-			return done("NewInstance", "Headscale initializes an empty instance on first start")
-		}
+		return bootstrapWithStatefulSet(h, sts), nil
 	case !apierrors.IsNotFound(err):
 		return bootstrapResult{}, err
 	}
@@ -116,7 +119,7 @@ func (r *HeadscaleReconciler) reconcileBootstrap(ctx context.Context, h *headsca
 	recovery := h.Spec.Bootstrap.Recovery
 
 	job := &batchv1.Job{}
-	err = r.Get(ctx, types.NamespacedName{Name: recoveryJobNameFor(h), Namespace: h.Namespace}, job)
+	err = reader.Get(ctx, types.NamespacedName{Name: recoveryJobNameFor(h), Namespace: h.Namespace}, job)
 	switch {
 	case err == nil:
 		return r.observeRecoveryJob(ctx, h, job)
@@ -141,20 +144,13 @@ func (r *HeadscaleReconciler) reconcileBootstrap(ctx context.Context, h *headsca
 		// Prevented by CRD validation; kept as a guard.
 		return wait("SourceNotFound", fmt.Sprintf("external_backups has no entry named %q", recovery.Source))
 	}
-	plan, err := planRecoveryFor(view)
+	plan, err := planRecoveryFor(h.Spec.Version, view)
 	if err != nil {
 		return wait(conditionReason(err, "InvalidConfiguration"), err.Error())
 	}
-	store, err := r.objectStoreFor(ctx, h.Namespace, source.ObjectStore)
-	if err != nil {
-		return wait(conditionReason(err, "ObjectStoreUnreachable"), err.Error())
-	}
-	in, err := archive.Inspect(ctx, store)
-	if err != nil {
-		return wait("ObjectStoreUnreachable", fmt.Sprintf("Could not inspect %s: %v", source.ObjectStore.DestinationPath, err))
-	}
-	if !in.HasSnapshot {
-		return wait("NoRecoverableBackup", fmt.Sprintf("%s holds no database snapshot to recover from", source.ObjectStore.DestinationPath))
+	in, reason, message := r.checkRecoverySource(ctx, h, source)
+	if reason != "" {
+		return wait(reason, message)
 	}
 	for _, role := range in.MissingKeys(plan.roles()) {
 		if archive.RequiredForRecovery(role) {
@@ -177,8 +173,77 @@ func (r *HeadscaleReconciler) reconcileBootstrap(ctx context.Context, h *headsca
 		return bootstrapResult{}, err
 	}
 	logf.FromContext(ctx).Info("Created recovery Job", "job", job.Name, "source", source.ObjectStore.DestinationPath)
+	if in.Manifest != nil {
+		// The DERP key is optional (clients learn a new one from the DERP
+		// map); only the server identity is worth a warning.
+		for role := range in.Manifest.Keys {
+			if archive.RequiredForRecovery(role) && !slices.Contains(plan.roles(), role) {
+				r.event(h, corev1.EventTypeWarning, "KeyNotRestored", fmt.Sprintf(
+					"The archive holds the %s private key, but spec.config keeps it outside %s: it is not restored, and headscale uses whatever key is configured",
+					role, headscaleDataDir))
+			}
+		}
+	}
 	r.event(h, corev1.EventTypeNormal, "RecoveryStarted", fmt.Sprintf("Recovering from %s%s", source.ObjectStore.DestinationPath, targetDescription(recovery)))
 	return wait("RecoveryRunning", fmt.Sprintf("Recovering from %s%s", source.ObjectStore.DestinationPath, targetDescription(recovery)))
+}
+
+// bootstrapWithStatefulSet is the outcome for an instance whose StatefulSet
+// already exists. It is derived from the spec rather than the previous
+// condition, so a reconcile working from a stale cache reports the same one.
+func bootstrapWithStatefulSet(h *headscalev1beta1.Headscale, sts *appsv1.StatefulSet) bootstrapResult {
+	result := func(status metav1.ConditionStatus, reason, message string) bootstrapResult {
+		return bootstrapResult{
+			cond:  newCondition(h, bootstrappedConditionType, status, reason, message),
+			ready: status == metav1.ConditionTrue,
+		}
+	}
+	switch {
+	case h.Spec.Bootstrap == nil:
+		// Every installation that predates spec.bootstrap ends up here.
+		return result(metav1.ConditionTrue, "NotRequired", "The instance already has its data")
+	case h.Spec.Bootstrap.Recovery == nil:
+		return result(metav1.ConditionTrue, "NewInstance", "Headscale initializes an empty instance on first start")
+	case !metav1.IsControlledBy(sts, h):
+		// Left behind by another (deleted) Headscale of the same name:
+		// adopting it would skip the recovery and serve its data.
+		return result(metav1.ConditionFalse, "StatefulSetConflict", fmt.Sprintf(
+			"StatefulSet %s already exists and does not belong to this Headscale; delete it (and its PVC) to recover", sts.Name))
+	default:
+		// bootstrap cannot be added to an existing instance, and the
+		// StatefulSet is only created once the recovery succeeded.
+		return result(metav1.ConditionTrue, "Recovered", recoveredMessage(h))
+	}
+}
+
+// checkRecoverySource inspects the recovery source and returns a reason (and
+// message) to wait on when nothing can be recovered from it: no snapshot, or
+// a recovery target before its oldest recovery point.
+func (r *HeadscaleReconciler) checkRecoverySource(
+	ctx context.Context,
+	h *headscalev1beta1.Headscale,
+	source *headscalev1beta1.ExternalBackup,
+) (in archive.Inspection, reason, message string) {
+	path := source.ObjectStore.DestinationPath
+	store, err := r.objectStoreFor(ctx, h.Namespace, source.ObjectStore)
+	if err != nil {
+		return in, conditionReason(err, "ObjectStoreUnreachable"), err.Error()
+	}
+	inspectCtx, cancel := context.WithTimeout(ctx, objectStoreTimeout)
+	defer cancel()
+	if in, err = archive.Inspect(inspectCtx, store); err != nil {
+		return in, "ObjectStoreUnreachable", fmt.Sprintf("Could not inspect %s: %v", path, err)
+	}
+	if !in.HasSnapshot {
+		return in, "NoRecoverableBackup", fmt.Sprintf("%s holds no database snapshot to recover from", path)
+	}
+	if t := h.Spec.Bootstrap.Recovery.RecoveryTarget; t != nil && in.FirstRecoverabilityPoint != nil &&
+		t.TargetTime.Add(recoveryTargetTolerance).Before(*in.FirstRecoverabilityPoint) {
+		return in, "TargetOutOfRange", fmt.Sprintf(
+			"recovery_target.target_time %s is before the oldest recovery point of %s (%s)",
+			t.TargetTime.UTC().Format(time.RFC3339), path, in.FirstRecoverabilityPoint.UTC().Format(time.RFC3339))
+	}
+	return in, "", ""
 }
 
 // observeRecoveryJob maps the recovery Job's state to the bootstrap result.
@@ -194,7 +259,10 @@ func (r *HeadscaleReconciler) observeRecoveryJob(ctx context.Context, h *headsca
 			return bootstrapResult{}, err
 		}
 		msg := recoveredMessage(h)
-		r.event(h, corev1.EventTypeNormal, "RecoveryCompleted", msg)
+		if prev := meta.FindStatusCondition(h.Status.Conditions, bootstrappedConditionType); job.DeletionTimestamp == nil &&
+			(prev == nil || prev.Reason != "Recovered") {
+			r.event(h, corev1.EventTypeNormal, "RecoveryCompleted", msg)
+		}
 		return bootstrapResult{cond: newCondition(h, bootstrappedConditionType, metav1.ConditionTrue, "Recovered", msg), ready: true}, nil
 
 	case jobHasCondition(job, batchv1.JobFailed):
@@ -209,8 +277,43 @@ func (r *HeadscaleReconciler) observeRecoveryJob(ctx context.Context, h *headsca
 		return bootstrapResult{cond: newCondition(h, bootstrappedConditionType, metav1.ConditionFalse, "RecoveryFailed", msg)}, nil
 	}
 
-	return bootstrapResult{cond: newCondition(h, bootstrappedConditionType, metav1.ConditionFalse, "RecoveryRunning",
-		fmt.Sprintf("Recovering from %s%s", source, targetDescription(recovery)))}, nil
+	msg := fmt.Sprintf("Recovering from %s%s", source, targetDescription(recovery))
+	if detail := r.recoveryWaiting(ctx, job); detail != "" {
+		msg += "; " + detail
+	}
+	return bootstrapResult{cond: newCondition(h, bootstrappedConditionType, metav1.ConditionFalse, "RecoveryRunning", msg)}, nil
+}
+
+// recoveryWaiting explains why a recovery pod's container is stuck before it
+// runs (missing Secret, image pull error, ...), which would otherwise only
+// show up as a recovery that never ends.
+func (r *HeadscaleReconciler) recoveryWaiting(ctx context.Context, job *batchv1.Job) string {
+	pods := &corev1.PodList{}
+	if err := r.List(ctx, pods, client.InNamespace(job.Namespace), client.MatchingLabels{batchv1.JobNameLabel: job.Name}); err != nil {
+		return ""
+	}
+	for i := range pods.Items {
+		statuses := slices.Concat(pods.Items[i].Status.InitContainerStatuses, pods.Items[i].Status.ContainerStatuses)
+		for _, cs := range statuses {
+			w := cs.State.Waiting
+			if w == nil || w.Reason == "" || w.Reason == "ContainerCreating" || w.Reason == "PodInitializing" {
+				continue
+			}
+			if w.Message != "" {
+				return cs.Name + ": " + w.Reason + ": " + w.Message
+			}
+			return cs.Name + ": " + w.Reason
+		}
+	}
+	return ""
+}
+
+// uncachedReader reads from the API server, bypassing the informer cache.
+func (r *HeadscaleReconciler) uncachedReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 // recoveryFailure returns the termination message of the recovery pod's
@@ -268,9 +371,13 @@ func targetDescription(recovery *headscalev1beta1.BootstrapRecovery) string {
 	return " (as of " + recovery.RecoveryTarget.TargetTime.UTC().Format(time.RFC3339) + ")"
 }
 
-// planRecoveryFor checks that the new instance's config keeps its database
-// and keys where the recovery Job can write them.
-func planRecoveryFor(view headscaleConfigView) (backupPlan, error) {
+// planRecoveryFor checks that the new instance's version can run on the
+// recovered database and that its config keeps the database and keys where
+// the recovery Job can write them.
+func planRecoveryFor(version string, view headscaleConfigView) (backupPlan, error) {
+	if err := checkLitestreamCompatible(version); err != nil {
+		return backupPlan{}, err
+	}
 	switch view.DatabaseType {
 	case "sqlite", "sqlite3":
 	default:
@@ -383,7 +490,8 @@ func (r *HeadscaleReconciler) recoveryJobFor(h *headscalev1beta1.Headscale, sour
 		Namespace: h.Namespace,
 		Labels:    labels,
 		Spec: batchv1.JobSpec{
-			BackoffLimit: new(recoveryJobBackoffLimit),
+			BackoffLimit:          new(recoveryJobBackoffLimit),
+			ActiveDeadlineSeconds: new(recoveryJobDeadline),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: podLabels},
 				Spec: corev1.PodSpec{

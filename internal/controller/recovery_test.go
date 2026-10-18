@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -25,6 +26,9 @@ import (
 )
 
 const recoverySourcePath = "s3://bucket/old"
+
+// sourceSnapshotTime is when the recovery source's oldest snapshot was taken.
+var sourceSnapshotTime = time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 
 func recoveryHeadscale(name string, target *time.Time) *headscalev1beta1.Headscale {
 	h := validationHeadscale(name)
@@ -65,7 +69,7 @@ var _ = Describe("Recovery rendering", func() {
 		target := time.Date(2026, 10, 10, 8, 0, 0, 0, time.UTC)
 		h := recoveryHeadscale("job", &target)
 		h.Spec.ImagePullSecrets = []string{testPullSecret}
-		plan, err := planRecoveryFor(parseConfigView(h.Spec.Config))
+		plan, err := planRecoveryFor(testHeadscaleVersion, parseConfigView(h.Spec.Config))
 		Expect(err).NotTo(HaveOccurred())
 		job := (&HeadscaleReconciler{BackupAgentImage: "agent:v1"}).recoveryJobFor(h, &h.Spec.ExternalBackups[0], plan)
 
@@ -74,6 +78,7 @@ var _ = Describe("Recovery rendering", func() {
 			To(BeFalse(), "the recovery pod must not join the headscale Service or readiness checks")
 		pod := job.Spec.Template.Spec
 		Expect(pod.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
+		Expect(job.Spec.ActiveDeadlineSeconds).To(HaveValue(Equal(recoveryJobDeadline)), "a hanging recovery eventually fails")
 		Expect(pod.AutomountServiceAccountToken).To(HaveValue(BeFalse()))
 		Expect(pod.SecurityContext.RunAsUser).To(HaveValue(Equal(int64(65532))))
 		Expect(pod.ImagePullSecrets).To(ConsistOf(corev1.LocalObjectReference{Name: testPullSecret}))
@@ -105,7 +110,7 @@ var _ = Describe("Recovery rendering", func() {
 
 	It("restores the latest state without a recovery target", func() {
 		h := recoveryHeadscale("job", nil)
-		plan, err := planRecoveryFor(parseConfigView(h.Spec.Config))
+		plan, err := planRecoveryFor(testHeadscaleVersion, parseConfigView(h.Spec.Config))
 		Expect(err).NotTo(HaveOccurred())
 		job := (&HeadscaleReconciler{}).recoveryJobFor(h, &h.Spec.ExternalBackups[0], plan)
 		Expect(job.Spec.Template.Spec.InitContainers[0].Args).NotTo(ContainElement("-timestamp"))
@@ -120,14 +125,31 @@ var _ = Describe("Recovery rendering", func() {
 
 	DescribeTable("planRecoveryFor rejects configurations it cannot recover into",
 		func(cfg, reason string) {
-			_, err := planRecoveryFor(parseConfigView(rawConfig(cfg)))
+			_, err := planRecoveryFor(testHeadscaleVersion, parseConfigView(rawConfig(cfg)))
 			Expect(conditionReason(err, "")).To(Equal(reason))
 		},
 		Entry("postgres", `{"database":{"type":"postgres"}}`, "UnsupportedDatabase"),
 		Entry("no database path", `{"database":{"type":"sqlite"}}`, "MissingSetting"),
 		Entry("database off the data volume", `{"database":{"type":"sqlite","sqlite":{"path":"/tmp/db.sqlite"}}}`, "UnsupportedPath"),
 	)
+
+	It("planRecoveryFor refuses headscale versions that can't open a Litestream-replicated database", func() {
+		_, err := planRecoveryFor("v0.26.1", parseConfigView(rawConfig(backupConfigJSON)))
+		Expect(conditionReason(err, "")).To(Equal("UnsupportedVersion"))
+	})
 })
+
+// staleCache serves StatefulSets and Jobs as if the informer cache had not
+// seen them yet, like a reconcile right after a recovery completed.
+type staleCache struct{ client.Client }
+
+func (c staleCache) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	switch obj.(type) {
+	case *appsv1.StatefulSet, *batchv1.Job:
+		return apierrors.NewNotFound(schema.GroupResource{}, key.Name)
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
 
 var _ = Describe("Headscale bootstrap reconciliation", func() {
 	const (
@@ -181,7 +203,7 @@ var _ = Describe("Headscale bootstrap reconciliation", func() {
 	}
 	seedSource := func(roles ...string) {
 		src := storeFor(recoverySourcePath)
-		src.SetObject("db/0009/0000000000000001-0000000000000001.ltx", []byte("snapshot"), time.Now())
+		src.SetObject("db/0009/0000000000000001-0000000000000001.ltx", []byte("snapshot"), sourceSnapshotTime)
 		m := &archive.Manifest{Keys: map[string]archive.KeyEntry{}}
 		for _, role := range roles {
 			m.Keys[role] = archive.KeyEntry{SHA256: "x"}
@@ -354,6 +376,72 @@ var _ = Describe("Headscale bootstrap reconciliation", func() {
 		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 		Expect(cond.Reason).To(Equal("Recovered"))
 		Expect(exists(&batchv1.Job{}, name+"-full-recovery")).To(BeFalse())
+
+		By("never starting a second recovery when the cache lags behind the API server")
+		h = getHeadscale()
+		meta.SetStatusCondition(&h.Status.Conditions, metav1.Condition{
+			Type: bootstrappedConditionType, Status: metav1.ConditionFalse, Reason: "RecoveryRunning", Message: "stale",
+		})
+		Expect(k8sClient.Status().Update(ctx, h)).To(Succeed())
+		r.Client, r.APIReader = staleCache{k8sClient}, k8sClient
+		reconcileOnce()
+		Expect(condition(bootstrappedConditionType).Reason).To(Equal("Recovered"))
+		Expect(exists(&batchv1.Job{}, name+"-full-recovery")).To(BeFalse())
+		Expect(recordedEvents()).NotTo(ContainElement(HavePrefix("Normal RecoveryStarted")))
+	})
+
+	It("refuses to recover over a StatefulSet it does not own", func() {
+		seedSource(archive.RoleNoise)
+		h := recoveryHeadscale(name, nil)
+		orphan := (&HeadscaleReconciler{}).statefulSetForHeadscale(h, parseConfigView(h.Spec.Config), "hash")
+		Expect(k8sClient.Create(ctx, orphan)).To(Succeed())
+		Expect(k8sClient.Create(ctx, h)).To(Succeed())
+		reconcileOnce()
+		cond := condition(bootstrappedConditionType)
+		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(cond.Reason).To(Equal("StatefulSetConflict"))
+		Expect(exists(&batchv1.Job{}, name+"-full-recovery")).To(BeFalse())
+		sts := &appsv1.StatefulSet{}
+		Expect(exists(sts, name)).To(BeTrue())
+		Expect(sts.OwnerReferences).To(BeEmpty(), "the orphan is not adopted")
+	})
+
+	It("explains a recovery pod that cannot start", func() {
+		seedSource(archive.RoleNoise)
+		Expect(k8sClient.Create(ctx, recoveryHeadscale(name, nil))).To(Succeed())
+		reconcileOnce()
+		pod := &corev1.Pod{
+			Name:      name + "-recovery-pod",
+			Namespace: namespace,
+			Labels:    map[string]string{batchv1.JobNameLabel: name + "-full-recovery"},
+			Spec:      corev1.PodSpec{Containers: []corev1.Container{{Name: restoreContainerName, Image: "agent"}}},
+		}
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+			Name: litestreamRestoreContainerName,
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+				Reason: "CreateContainerConfigError", Message: `secret "s3" not found`,
+			}},
+		}}
+		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+		reconcileOnce()
+		cond := condition(bootstrappedConditionType)
+		Expect(cond.Reason).To(Equal("RecoveryRunning"))
+		Expect(cond.Message).To(ContainSubstring(`litestream-restore: CreateContainerConfigError: secret "s3" not found`))
+	})
+
+	It("warns when an archived key is not restored", func() {
+		seedSource(archive.RoleNoise)
+		h := recoveryHeadscale(name, nil)
+		h.Spec.Config = rawConfig(`{
+			"server_url": "https://headscale.example.com",
+			"database": {"type": "sqlite", "sqlite": {"path": "/var/lib/headscale/db.sqlite"}},
+			"noise": {"private_key_path": "/etc/headscale-keys/noise.key"}
+		}`)
+		Expect(k8sClient.Create(ctx, h)).To(Succeed())
+		reconcileOnce()
+		Expect(condition(bootstrappedConditionType).Reason).To(Equal("RecoveryRunning"))
+		Expect(recordedEvents()).To(ContainElement(HavePrefix("Warning KeyNotRestored")))
 	})
 
 	It("reports a failed recovery and retries when the Job is deleted", func() {
@@ -426,6 +514,25 @@ var _ = Describe("Headscale bootstrap reconciliation", func() {
 		Entry("noise key missing", func() { seedSource(archive.RoleDERP) }, "KeysMissing"),
 		Entry("unreachable store", func() { storeFor(recoverySourcePath).Err = context.DeadlineExceeded }, "ObjectStoreUnreachable"),
 	)
+
+	It("refuses a recovery target before the oldest recovery point", func() {
+		seedSource(archive.RoleNoise)
+		target := sourceSnapshotTime.Add(-24 * time.Hour)
+		Expect(k8sClient.Create(ctx, recoveryHeadscale(name, &target))).To(Succeed())
+		reconcileOnce()
+		cond := condition(bootstrappedConditionType)
+		Expect(cond.Reason).To(Equal("TargetOutOfRange"))
+		Expect(cond.Message).To(ContainSubstring("2026-10-01T00:00:00Z"))
+		Expect(exists(&batchv1.Job{}, name+"-full-recovery")).To(BeFalse())
+	})
+
+	It("accepts a target taken shortly before the snapshot was uploaded", func() {
+		seedSource(archive.RoleNoise)
+		target := sourceSnapshotTime.Add(-time.Minute)
+		Expect(k8sClient.Create(ctx, recoveryHeadscale(name, &target))).To(Succeed())
+		reconcileOnce()
+		Expect(condition(bootstrappedConditionType).Reason).To(Equal("RecoveryRunning"))
+	})
 
 	It("accepts a source without the DERP key", func() {
 		seedSource(archive.RoleNoise)

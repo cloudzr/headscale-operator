@@ -174,6 +174,7 @@ func main() {
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorder("headscale"),
 
+		APIReader:        mgr.GetAPIReader(),
 		BackupAgentImage: backupAgentImage,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "headscale")

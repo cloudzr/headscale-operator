@@ -698,10 +698,13 @@ Progress is reported on the `Bootstrapped` condition (and `Ready` is `False` wit
 |--------|---------|
 | `NewInstance` | `bootstrap.new` or no bootstrap: Headscale initializes an empty instance |
 | `NotRequired` | The instance already had its data (all instances created before this feature) |
-| `RecoveryRunning` | The recovery Job is running |
+| `RecoveryRunning` | The recovery Job is running. A container that cannot start (missing Secret, image pull error) is named in the message. A Job running for more than an hour fails |
 | `Recovered` | Recovery completed; the message names the source and target time |
 | `RecoveryFailed` | The Job failed; the message carries the Litestream or agent error. The Job is kept for inspection: **delete it to retry** |
 | `NoRecoverableBackup`, `KeysMissing` | The source has no snapshot, or no noise key |
+| `TargetOutOfRange` | `recovery_target.target_time` is before the source's oldest recovery point |
+| `StatefulSetConflict` | A StatefulSet of the same name, not owned by this resource (left over from a deleted one), exists. Delete it and its PVC to recover |
+| `UnsupportedVersion`, `UnsupportedDatabase`, `MissingSetting`, `UnsupportedPath` | The new instance cannot run on the recovered database (see Requirements) |
 | `PVCAlreadyExists` | `data-<name>-0` already exists; recovery never writes into existing data. Delete the PVC to recover into a fresh volume |
 
 `bootstrap` is immutable: it cannot be added to, changed on or removed from an existing resource.
