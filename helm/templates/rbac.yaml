@@ -25,19 +25,28 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - events
+  - persistentvolumeclaims
   verbs:
   - create
-  - patch
+  - get
+  - list
+  - watch
 - apiGroups:
   - ""
   resources:
-  - persistentvolumeclaims
   - pods
   verbs:
   - get
   - list
   - watch
+- apiGroups:
+  - ""
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
 - apiGroups:
   - apps
   resources:
@@ -49,6 +58,16 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
   - watch
 - apiGroups:
   - headscale.infrado.cloud
