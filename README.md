@@ -579,6 +579,7 @@ Both sidecars are [native sidecars](https://kubernetes.io/docs/concepts/workload
 **Requirements**
 
 - Kubernetes 1.29 or newer (native sidecars)
+- Headscale v0.27.1 or newer: older releases refuse to start on a database Litestream has replicated (they reject its `_litestream_*` tables, see [juanfont/headscale#2843](https://github.com/juanfont/headscale/pull/2843)). Older versions are reported as `UnsupportedVersion`
 - `replicas: 1` (enforced by the CRD)
 - `database.type: sqlite` with write-ahead logging (Headscale's default), with the database under `/var/lib/headscale`
 - Keys stored outside `/var/lib/headscale` (for example mounted from a Secret) are considered managed by you and are neither archived nor restored
@@ -652,7 +653,7 @@ The `ContinuousArchiving` condition is `True` once the sidecars run, a base snap
 | `CredentialsMissing` | The credentials Secret or key does not exist |
 | `ObjectStoreUnreachable` | The archive could not be read or written |
 | `ArchiveInUse` | Another Headscale instance owns `destination_path` |
-| `UnsupportedDatabase`, `WALDisabled`, `MissingSetting`, `UnsupportedPath`, `PortConflict` | `spec.config` cannot be archived (see Requirements) |
+| `UnsupportedDatabase`, `WALDisabled`, `MissingSetting`, `UnsupportedPath`, `PortConflict`, `UnsupportedVersion` | `spec.config` or `spec.version` cannot be archived (see Requirements) |
 
 Backup problems never take Headscale down: the sidecars have no readiness probes and keep retrying, and once an archive is claimed, credential or object store errors are only reported, never acted upon.
 
@@ -713,17 +714,17 @@ A complete example is in [config/samples/headscale_v1beta1_headscale_recovery.ya
 
 #### Safety Guarantees
 
-- **One writer per archive.** The first instance archiving to a path records itself in `.headscale-operator.json`; any other instance pointed at it reports `ArchiveInUse` and does not archive.
+- **One writer per archive.** The first instance archiving to a path records itself in `.headscale-operator.json`, written with a conditional put (`If-None-Match`) and read back, so of two instances racing for a path only one wins. Any other instance pointed at it reports `ArchiveInUse` and does not archive.
 - **The recovery source is read-only.** The CRD rejects a `backup.object_store.destination_path` that equals, contains or is contained in the recovery source path (on the same endpoint), so a recovered instance always starts a fresh archive.
 - **Existing data is never overwritten.** Recovery only writes into a PVC it created itself, and the agent refuses to replace an existing database.
 - **No silent identity change.** A recovery fails rather than proceed without the noise key. (The DERP key is optional: clients learn a new one from the DERP map.)
-- **Atomic restores.** The database is moved into place last, so a failed or interrupted recovery never leaves a volume that looks initialized.
+- **Restartable restores.** The agent records the recovery next to the database before moving anything into place, and moves the database last. A failed recovery never leaves a volume that looks initialized, and an interrupted one completes when the Job retries.
 
 #### Securing the Archive
 
-The archive holds Headscale's database and its private keys, which is everything needed to impersonate the server. Treat the bucket accordingly:
+The archive holds Headscale's database and its private keys, which is everything needed to impersonate the server. The operator does not encrypt the archive: protecting it is the object store's job. Treat the bucket accordingly:
 
-- Enable server-side encryption on the bucket (SSE-S3 or SSE-KMS). Litestream 0.5 has no client-side encryption.
+- Enable server-side encryption on the bucket (SSE-S3 or SSE-KMS).
 - Give each instance credentials limited to its prefix. For AWS S3:
 
   ```json
@@ -742,16 +743,23 @@ The archive holds Headscale's database and its private keys, which is everything
 
 #### Monitoring Backups
 
-While backup is enabled, the `<name>-metrics` Service also exposes Litestream's Prometheus metrics on port `9091` (named `litestream`). Useful alerts:
+Watch the `ContinuousArchiving` condition: it is the one signal that covers the pod's own path to the archive (see [Backup Status](#backup-status)). Every change of its reason is also recorded as an event on the Headscale resource, as a `Warning` for real problems.
+
+While backup is enabled, the `<name>-metrics` Service also exposes Litestream's Prometheus metrics on port `9091` (named `litestream`). Litestream 0.5 does not count failed uploads, so use its metrics to complement the condition, not replace it:
 
 ```yaml
-- alert: HeadscaleBackupSyncErrors
-  expr: increase(litestream_sync_error_count[10m]) > 0
-- alert: HeadscaleBackupWALGrowing    # WAL keeps growing while uploads fail
+- alert: HeadscaleBackupWALGrowing    # the WAL keeps growing while uploads fail
   expr: litestream_wal_size > 64 * 1024 * 1024
+- alert: HeadscaleBackupSyncErrors    # Litestream cannot read the local database
+  expr: increase(litestream_sync_error_count[10m]) > 0
 ```
 
-The `ContinuousArchiving` condition and the `Warning` events on the Headscale resource report the same problems for clusters without Prometheus.
+#### Operating Notes
+
+- **Rotating the S3 credentials.** The sidecars read the Secret when the pod starts. After changing it, restart the pod (`kubectl rollout restart statefulset/<name>`). Until then the condition reports `AgentNotReporting` if the old keys stop working.
+- **Re-creating a Headscale resource** (delete and create, a GitOps re-sync after a cluster rebuild, a Velero restore) creates a new instance with a new UID. It reports `ArchiveInUse` on the old path, by design: point `backup` at a new path, or recover from the old archive with `bootstrap.recovery`. If the previous instance is gone for good and you want to keep writing to the same path, delete `<path>/.headscale-operator.json` yourself.
+- **Changing `destination_path`** claims the new path. Until that succeeds, nothing is archived: the sidecars are removed and `status.backup` is cleared.
+- **`external_backups` entries used by `bootstrap.recovery` cannot be removed**, since `bootstrap` is immutable and must keep pointing at an existing source. Keep the entry (and its Secret reference) for the lifetime of the resource.
 
 #### Disaster Recovery Runbook
 
