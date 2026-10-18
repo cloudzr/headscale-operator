@@ -78,7 +78,192 @@ type ACLPolicyConfig struct {
 	Inline string `json:"inline,omitempty"`
 }
 
+// SecretKeyReference selects a key of a Secret in the Headscale's namespace.
+type SecretKeyReference struct {
+	// Name of the Secret.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +required
+	Name string `json:"name"`
+
+	// Key within the Secret.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +required
+	Key string `json:"key"`
+}
+
+// S3Credentials configures how the backup components authenticate against
+// the object store. Either static keys or the ambient IAM role (IRSA, EKS Pod
+// Identity, GKE Workload Identity for S3-compatible endpoints) must be used.
+// +kubebuilder:validation:XValidation:rule="(has(self.inherit_from_iam_role) && self.inherit_from_iam_role) ? (!has(self.access_key_id) && !has(self.secret_access_key)) : (has(self.access_key_id) && has(self.secret_access_key))",message="set either access_key_id and secret_access_key, or inherit_from_iam_role"
+type S3Credentials struct {
+	// AccessKeyID references the Secret key holding the S3 access key ID.
+	// +optional
+	AccessKeyID *SecretKeyReference `json:"access_key_id,omitempty"`
+
+	// SecretAccessKey references the Secret key holding the S3 secret access key.
+	// +optional
+	SecretAccessKey *SecretKeyReference `json:"secret_access_key,omitempty"`
+
+	// InheritFromIAMRole uses the credentials provided by the pod's
+	// environment (e.g. IRSA) instead of static keys.
+	// +optional
+	InheritFromIAMRole bool `json:"inherit_from_iam_role,omitempty"`
+}
+
+// ObjectStoreConfig locates a backup archive in an S3-compatible object store.
+type ObjectStoreConfig struct {
+	// DestinationPath is the archive location, in the form
+	// s3://<bucket>[/<prefix>], without a trailing slash. The database is
+	// stored under <prefix>/db, headscale's private keys under <prefix>/keys.
+	// +kubebuilder:validation:Pattern=`^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9](/[^/]+)*$`
+	// +kubebuilder:validation:MaxLength=1024
+	// +required
+	DestinationPath string `json:"destination_path"`
+
+	// EndpointURL overrides the S3 endpoint, for S3-compatible stores
+	// (MinIO, Ceph RGW, Cloudflare R2, ...). Leave empty for AWS S3.
+	// +kubebuilder:validation:Pattern=`^https?://[^/]+/?$`
+	// +kubebuilder:validation:MaxLength=512
+	// +optional
+	EndpointURL string `json:"endpoint_url,omitempty"`
+
+	// Region of the bucket.
+	// +kubebuilder:validation:MaxLength=64
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// S3Credentials configures authentication against the object store.
+	// +required
+	S3Credentials S3Credentials `json:"s3_credentials"`
+}
+
+// LitestreamConfig tunes the Litestream sidecar that streams the SQLite
+// database to the object store.
+type LitestreamConfig struct {
+	// Image is the Litestream container image.
+	// +kubebuilder:default="litestream/litestream:0.5.17"
+	// +kubebuilder:validation:MinLength=1
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// SyncInterval is how often WAL changes are shipped to the object store,
+	// in Go duration format. It bounds the data loss window.
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$`
+	// +kubebuilder:default="1s"
+	// +optional
+	SyncInterval string `json:"sync_interval,omitempty"`
+
+	// SnapshotInterval is how often a full snapshot is taken, in Go duration
+	// format. Shorter intervals make restores faster.
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(s|m|h))+$`
+	// +kubebuilder:default="24h"
+	// +optional
+	SnapshotInterval string `json:"snapshot_interval,omitempty"`
+
+	// Resources for the Litestream container.
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitzero"`
+}
+
+// BackupAgentConfig configures the backup-agent sidecar that archives
+// headscale's private keys and restores them during recovery.
+type BackupAgentConfig struct {
+	// Image overrides the backup-agent image. Defaults to the image matching
+	// the operator release.
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// Resources for the backup-agent container.
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitzero"`
+}
+
+// BackupConfig enables continuous archiving of the headscale SQLite database
+// (via Litestream) and of headscale's private keys to an object store. It
+// only ever writes to the archive; restoring is done with spec.bootstrap.
+type BackupConfig struct {
+	// ObjectStore is where the archive is written. It must not be used by any
+	// other Headscale instance.
+	// +required
+	ObjectStore ObjectStoreConfig `json:"object_store"`
+
+	// RetentionPolicy is how long recovery points are kept, in Go duration
+	// format (e.g. "720h" for 30 days).
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(s|m|h))+$`
+	// +kubebuilder:default="720h"
+	// +optional
+	RetentionPolicy string `json:"retention_policy,omitempty"`
+
+	// Litestream tunes the database streaming sidecar.
+	// +kubebuilder:default={}
+	// +optional
+	Litestream LitestreamConfig `json:"litestream,omitzero"`
+
+	// Agent configures the key-archiving sidecar.
+	// +optional
+	Agent BackupAgentConfig `json:"agent,omitzero"`
+}
+
+// ExternalBackup names an archive that can be used as a recovery source.
+type ExternalBackup struct {
+	// Name identifies this source in bootstrap.recovery.source.
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:MaxLength=63
+	// +required
+	Name string `json:"name"`
+
+	// ObjectStore locates the archive. It is only ever read.
+	// +required
+	ObjectStore ObjectStoreConfig `json:"object_store"`
+}
+
+// BootstrapNew creates an empty headscale instance. Headscale initializes its
+// database and keys on first start. This is the default when bootstrap is unset.
+type BootstrapNew struct{}
+
+// RecoveryTarget selects the point in time to recover to.
+type RecoveryTarget struct {
+	// TargetTime is the RFC 3339 timestamp to recover the database to.
+	// +required
+	TargetTime metav1.Time `json:"target_time"`
+}
+
+// BootstrapRecovery creates the instance from an existing archive.
+type BootstrapRecovery struct {
+	// Source is the name of the external_backups entry to recover from.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +required
+	Source string `json:"source"`
+
+	// RecoveryTarget enables point-in-time recovery. When unset, the latest
+	// available state is recovered.
+	// +optional
+	RecoveryTarget *RecoveryTarget `json:"recovery_target,omitempty"`
+}
+
+// BootstrapConfig controls how the instance's data is initialized. It is
+// evaluated once, when the instance is created, and is immutable afterwards.
+// +kubebuilder:validation:XValidation:rule="has(self.new) != has(self.recovery)",message="exactly one of bootstrap.new or bootstrap.recovery must be set"
+// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="bootstrap is immutable"
+type BootstrapConfig struct {
+	// New creates an empty instance.
+	// +optional
+	New *BootstrapNew `json:"new,omitempty"`
+
+	// Recovery restores the database and private keys from an archive
+	// before headscale first starts.
+	// +optional
+	Recovery *BootstrapRecovery `json:"recovery,omitempty"`
+}
+
 // HeadscaleSpec defines the desired state of Headscale
+// +kubebuilder:validation:XValidation:rule="has(self.bootstrap) == has(oldSelf.bootstrap)",message="bootstrap cannot be added or removed after creation"
+// +kubebuilder:validation:XValidation:rule="!has(self.bootstrap) || !has(self.bootstrap.recovery) || (has(self.external_backups) && self.external_backups.exists(e, e.name == self.bootstrap.recovery.source))",message="bootstrap.recovery.source must reference an entry in external_backups"
+// +kubebuilder:validation:XValidation:rule="!(has(self.backup) || (has(self.bootstrap) && has(self.bootstrap.recovery))) || self.replicas <= 1",message="backup and bootstrap.recovery require replicas <= 1"
+// +kubebuilder:validation:XValidation:rule="!has(self.backup) || !has(self.bootstrap) || !has(self.bootstrap.recovery) || !has(self.external_backups) || self.external_backups.all(e, e.name != self.bootstrap.recovery.source || (has(e.object_store.endpoint_url) ? e.object_store.endpoint_url : \"\") != (has(self.backup.object_store.endpoint_url) ? self.backup.object_store.endpoint_url : \"\") || !((self.backup.object_store.destination_path + '/').startsWith(e.object_store.destination_path + '/') || (e.object_store.destination_path + '/').startsWith(self.backup.object_store.destination_path + '/')))",message="backup.object_store.destination_path must not overlap the recovery source archive"
 type HeadscaleSpec struct {
 	// Version indicates the version of Headscale to deploy.
 	// +kubebuilder:validation:Pattern=`^v?(\d+\.)?(\d+\.)?(\*|\d+)(-.+)?$`
@@ -140,6 +325,46 @@ type HeadscaleSpec struct {
 	// Requires `spec.config.policy.mode=database`.
 	// +optional
 	ACLPolicy ACLPolicyConfig `json:"acl_policy"`
+
+	// Backup enables continuous archiving of the SQLite database and of
+	// headscale's private keys to an object store. Requires the SQLite
+	// database backend with write-ahead logging (headscale's default).
+	// +optional
+	Backup *BackupConfig `json:"backup,omitempty"`
+
+	// Bootstrap controls how the instance's data is initialized when it is
+	// created: empty (default) or recovered from an archive. Immutable.
+	// +optional
+	Bootstrap *BootstrapConfig `json:"bootstrap,omitempty"`
+
+	// ExternalBackups lists archives that bootstrap.recovery can read from.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=8
+	// +optional
+	ExternalBackups []ExternalBackup `json:"external_backups,omitempty"`
+}
+
+// BackupStatus reports the state of the archive written by spec.backup.
+type BackupStatus struct {
+	// DestinationPath is the archive this instance writes to.
+	// +optional
+	DestinationPath string `json:"destination_path,omitempty"`
+
+	// FirstRecoverabilityPoint is the earliest time the database can be
+	// recovered to.
+	// +optional
+	FirstRecoverabilityPoint *metav1.Time `json:"first_recoverability_point,omitempty"`
+
+	// LastSuccessfulBackup is the time of the most recent object written to
+	// the database archive.
+	// +optional
+	LastSuccessfulBackup *metav1.Time `json:"last_successful_backup,omitempty"`
+
+	// KeysArchived reports whether all of headscale's private keys are present
+	// in the archive.
+	// +optional
+	KeysArchived bool `json:"keys_archived,omitempty"`
 }
 
 // HeadscaleStatus defines the observed state of Headscale.
@@ -160,11 +385,18 @@ type HeadscaleStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Backup reports the state of the continuous archive.
+	// +optional
+	Backup *BackupStatus `json:"backup,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=hs
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Archiving",type=string,JSONPath=`.status.conditions[?(@.type=="ContinuousArchiving")].status`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.api_key.rotation_buffer) || !has(self.spec.api_key.expiration) || duration(self.spec.api_key.rotation_buffer) < duration(self.spec.api_key.expiration)",message="api_key.rotation_buffer must be less than api_key.expiration"
 
 // Headscale is the Schema for the headscales API

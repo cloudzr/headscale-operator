@@ -16,7 +16,17 @@ spec:
     singular: headscale
   scope: Namespaced
   versions:
-  - name: v1beta1
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="ContinuousArchiving")].status
+      name: Archiving
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
     schema:
       openAPIV3Schema:
         description: Headscale is the Schema for the headscales API
@@ -103,6 +113,295 @@ spec:
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                 type: object
+              backup:
+                description: |-
+                  Backup enables continuous archiving of the SQLite database and of
+                  headscale's private keys to an object store. Requires the SQLite
+                  database backend with write-ahead logging (headscale's default).
+                properties:
+                  agent:
+                    description: Agent configures the key-archiving sidecar.
+                    properties:
+                      image:
+                        description: |-
+                          Image overrides the backup-agent image. Defaults to the image matching
+                          the operator release.
+                        type: string
+                      resources:
+                        description: Resources for the backup-agent container.
+                        properties:
+                          claims:
+                            description: |-
+                              Claims lists the names of resources, defined in spec.resourceClaims,
+                              that are used by this container.
+
+                              This field depends on the
+                              DynamicResourceAllocation feature gate.
+
+                              This field is immutable. It can only be set for containers.
+                            items:
+                              description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                              properties:
+                                name:
+                                  description: |-
+                                    Name must match the name of one entry in pod.spec.resourceClaims of
+                                    the Pod where this field is used. It makes that resource available
+                                    inside a container.
+                                  type: string
+                                request:
+                                  description: |-
+                                    Request is the name chosen for a request in the referenced claim.
+                                    If empty, everything from the claim is made available, otherwise
+                                    only the result of this request.
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
+                          limits:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Limits describes the maximum amount of compute resources allowed.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                          requests:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Requests describes the minimum amount of compute resources required.
+                              If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                              otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                        type: object
+                    type: object
+                  litestream:
+                    default: {}
+                    description: Litestream tunes the database streaming sidecar.
+                    properties:
+                      image:
+                        default: litestream/litestream:0.5.17
+                        description: Image is the Litestream container image.
+                        minLength: 1
+                        type: string
+                      resources:
+                        description: Resources for the Litestream container.
+                        properties:
+                          claims:
+                            description: |-
+                              Claims lists the names of resources, defined in spec.resourceClaims,
+                              that are used by this container.
+
+                              This field depends on the
+                              DynamicResourceAllocation feature gate.
+
+                              This field is immutable. It can only be set for containers.
+                            items:
+                              description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                              properties:
+                                name:
+                                  description: |-
+                                    Name must match the name of one entry in pod.spec.resourceClaims of
+                                    the Pod where this field is used. It makes that resource available
+                                    inside a container.
+                                  type: string
+                                request:
+                                  description: |-
+                                    Request is the name chosen for a request in the referenced claim.
+                                    If empty, everything from the claim is made available, otherwise
+                                    only the result of this request.
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
+                          limits:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Limits describes the maximum amount of compute resources allowed.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                          requests:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Requests describes the minimum amount of compute resources required.
+                              If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                              otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                        type: object
+                      snapshot_interval:
+                        default: 24h
+                        description: |-
+                          SnapshotInterval is how often a full snapshot is taken, in Go duration
+                          format. Shorter intervals make restores faster.
+                        pattern: ^([0-9]+(\.[0-9]+)?(s|m|h))+$
+                        type: string
+                      sync_interval:
+                        default: 1s
+                        description: |-
+                          SyncInterval is how often WAL changes are shipped to the object store,
+                          in Go duration format. It bounds the data loss window.
+                        pattern: ^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$
+                        type: string
+                    type: object
+                  object_store:
+                    description: |-
+                      ObjectStore is where the archive is written. It must not be used by any
+                      other Headscale instance.
+                    properties:
+                      destination_path:
+                        description: |-
+                          DestinationPath is the archive location, in the form
+                          s3://<bucket>[/<prefix>], without a trailing slash. The database is
+                          stored under <prefix>/db, headscale's private keys under <prefix>/keys.
+                        maxLength: 1024
+                        pattern: ^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9](/[^/]+)*$
+                        type: string
+                      endpoint_url:
+                        description: |-
+                          EndpointURL overrides the S3 endpoint, for S3-compatible stores
+                          (MinIO, Ceph RGW, Cloudflare R2, ...). Leave empty for AWS S3.
+                        maxLength: 512
+                        pattern: ^https?://[^/]+/?$
+                        type: string
+                      region:
+                        description: Region of the bucket.
+                        maxLength: 64
+                        type: string
+                      s3_credentials:
+                        description: S3Credentials configures authentication against
+                          the object store.
+                        properties:
+                          access_key_id:
+                            description: AccessKeyID references the Secret key holding
+                              the S3 access key ID.
+                            properties:
+                              key:
+                                description: Key within the Secret.
+                                maxLength: 253
+                                minLength: 1
+                                type: string
+                              name:
+                                description: Name of the Secret.
+                                maxLength: 253
+                                minLength: 1
+                                type: string
+                            required:
+                            - key
+                            - name
+                            type: object
+                          inherit_from_iam_role:
+                            description: |-
+                              InheritFromIAMRole uses the credentials provided by the pod's
+                              environment (e.g. IRSA) instead of static keys.
+                            type: boolean
+                          secret_access_key:
+                            description: SecretAccessKey references the Secret key
+                              holding the S3 secret access key.
+                            properties:
+                              key:
+                                description: Key within the Secret.
+                                maxLength: 253
+                                minLength: 1
+                                type: string
+                              name:
+                                description: Name of the Secret.
+                                maxLength: 253
+                                minLength: 1
+                                type: string
+                            required:
+                            - key
+                            - name
+                            type: object
+                        type: object
+                        x-kubernetes-validations:
+                        - message: set either access_key_id and secret_access_key,
+                            or inherit_from_iam_role
+                          rule: '(has(self.inherit_from_iam_role) && self.inherit_from_iam_role)
+                            ? (!has(self.access_key_id) && !has(self.secret_access_key))
+                            : (has(self.access_key_id) && has(self.secret_access_key))'
+                    required:
+                    - destination_path
+                    - s3_credentials
+                    type: object
+                  retention_policy:
+                    default: 720h
+                    description: |-
+                      RetentionPolicy is how long recovery points are kept, in Go duration
+                      format (e.g. "720h" for 30 days).
+                    pattern: ^([0-9]+(\.[0-9]+)?(s|m|h))+$
+                    type: string
+                required:
+                - object_store
+                type: object
+              bootstrap:
+                description: |-
+                  Bootstrap controls how the instance's data is initialized when it is
+                  created: empty (default) or recovered from an archive. Immutable.
+                properties:
+                  new:
+                    description: New creates an empty instance.
+                    type: object
+                  recovery:
+                    description: |-
+                      Recovery restores the database and private keys from an archive
+                      before headscale first starts.
+                    properties:
+                      recovery_target:
+                        description: |-
+                          RecoveryTarget enables point-in-time recovery. When unset, the latest
+                          available state is recovered.
+                        properties:
+                          target_time:
+                            description: TargetTime is the RFC 3339 timestamp to recover
+                              the database to.
+                            format: date-time
+                            type: string
+                        required:
+                        - target_time
+                        type: object
+                      source:
+                        description: Source is the name of the external_backups entry
+                          to recover from.
+                        maxLength: 63
+                        minLength: 1
+                        type: string
+                    required:
+                    - source
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: exactly one of bootstrap.new or bootstrap.recovery must
+                    be set
+                  rule: has(self.new) != has(self.recovery)
+                - message: bootstrap is immutable
+                  rule: self == oldSelf
               config:
                 description: |-
                   Config is headscale's configuration, passed through to config.yaml
@@ -115,6 +414,106 @@ spec:
                   (/var/run/headscale/headscale.sock). server_url is required by headscale.
                 type: object
                 x-kubernetes-preserve-unknown-fields: true
+              external_backups:
+                description: ExternalBackups lists archives that bootstrap.recovery
+                  can read from.
+                items:
+                  description: ExternalBackup names an archive that can be used as
+                    a recovery source.
+                  properties:
+                    name:
+                      description: Name identifies this source in bootstrap.recovery.source.
+                      maxLength: 63
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    object_store:
+                      description: ObjectStore locates the archive. It is only ever
+                        read.
+                      properties:
+                        destination_path:
+                          description: |-
+                            DestinationPath is the archive location, in the form
+                            s3://<bucket>[/<prefix>], without a trailing slash. The database is
+                            stored under <prefix>/db, headscale's private keys under <prefix>/keys.
+                          maxLength: 1024
+                          pattern: ^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9](/[^/]+)*$
+                          type: string
+                        endpoint_url:
+                          description: |-
+                            EndpointURL overrides the S3 endpoint, for S3-compatible stores
+                            (MinIO, Ceph RGW, Cloudflare R2, ...). Leave empty for AWS S3.
+                          maxLength: 512
+                          pattern: ^https?://[^/]+/?$
+                          type: string
+                        region:
+                          description: Region of the bucket.
+                          maxLength: 64
+                          type: string
+                        s3_credentials:
+                          description: S3Credentials configures authentication against
+                            the object store.
+                          properties:
+                            access_key_id:
+                              description: AccessKeyID references the Secret key holding
+                                the S3 access key ID.
+                              properties:
+                                key:
+                                  description: Key within the Secret.
+                                  maxLength: 253
+                                  minLength: 1
+                                  type: string
+                                name:
+                                  description: Name of the Secret.
+                                  maxLength: 253
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - key
+                              - name
+                              type: object
+                            inherit_from_iam_role:
+                              description: |-
+                                InheritFromIAMRole uses the credentials provided by the pod's
+                                environment (e.g. IRSA) instead of static keys.
+                              type: boolean
+                            secret_access_key:
+                              description: SecretAccessKey references the Secret key
+                                holding the S3 secret access key.
+                              properties:
+                                key:
+                                  description: Key within the Secret.
+                                  maxLength: 253
+                                  minLength: 1
+                                  type: string
+                                name:
+                                  description: Name of the Secret.
+                                  maxLength: 253
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - key
+                              - name
+                              type: object
+                          type: object
+                          x-kubernetes-validations:
+                          - message: set either access_key_id and secret_access_key,
+                              or inherit_from_iam_role
+                            rule: '(has(self.inherit_from_iam_role) && self.inherit_from_iam_role)
+                              ? (!has(self.access_key_id) && !has(self.secret_access_key))
+                              : (has(self.access_key_id) && has(self.secret_access_key))'
+                      required:
+                      - destination_path
+                      - s3_credentials
+                      type: object
+                  required:
+                  - name
+                  - object_store
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               extra_env:
                 description: ExtraEnv allows injecting additional environment variables
                   into the Headscale container
@@ -2396,9 +2795,52 @@ spec:
             - replicas
             - version
             type: object
+            x-kubernetes-validations:
+            - message: bootstrap cannot be added or removed after creation
+              rule: has(self.bootstrap) == has(oldSelf.bootstrap)
+            - message: bootstrap.recovery.source must reference an entry in external_backups
+              rule: '!has(self.bootstrap) || !has(self.bootstrap.recovery) || (has(self.external_backups)
+                && self.external_backups.exists(e, e.name == self.bootstrap.recovery.source))'
+            - message: backup and bootstrap.recovery require replicas <= 1
+              rule: '!(has(self.backup) || (has(self.bootstrap) && has(self.bootstrap.recovery)))
+                || self.replicas <= 1'
+            - message: backup.object_store.destination_path must not overlap the recovery
+                source archive
+              rule: '!has(self.backup) || !has(self.bootstrap) || !has(self.bootstrap.recovery)
+                || !has(self.external_backups) || self.external_backups.all(e, e.name
+                != self.bootstrap.recovery.source || (has(e.object_store.endpoint_url)
+                ? e.object_store.endpoint_url : "") != (has(self.backup.object_store.endpoint_url)
+                ? self.backup.object_store.endpoint_url : "") || !((self.backup.object_store.destination_path
+                + ''/'').startsWith(e.object_store.destination_path + ''/'') || (e.object_store.destination_path
+                + ''/'').startsWith(self.backup.object_store.destination_path + ''/'')))'
           status:
             description: status defines the observed state of Headscale
             properties:
+              backup:
+                description: Backup reports the state of the continuous archive.
+                properties:
+                  destination_path:
+                    description: DestinationPath is the archive this instance writes
+                      to.
+                    type: string
+                  first_recoverability_point:
+                    description: |-
+                      FirstRecoverabilityPoint is the earliest time the database can be
+                      recovered to.
+                    format: date-time
+                    type: string
+                  keys_archived:
+                    description: |-
+                      KeysArchived reports whether all of headscale's private keys are present
+                      in the archive.
+                    type: boolean
+                  last_successful_backup:
+                    description: |-
+                      LastSuccessfulBackup is the time of the most recent object written to
+                      the database archive.
+                    format: date-time
+                    type: string
+                type: object
               conditions:
                 description: |-
                   conditions represent the current state of the Headscale resource.
