@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/yaml"
 
@@ -485,6 +486,8 @@ var _ = Describe("Headscale backup reconciliation", func() {
 		cond := archivingCondition()
 		Expect(cond.Status).To(Equal(metav1.ConditionTrue), cond.Message)
 		Expect(cond.Reason).To(Equal("Archiving"))
+		Expect(cond.Message).To(Equal("Archiving to s3://bucket/healthy"),
+			"the message must not change with every backup, or each reconcile patches the status")
 		st := getHeadscale().Status.Backup
 		Expect(st.KeysArchived).To(BeTrue())
 		Expect(st.FirstRecoverabilityPoint.UTC()).To(Equal(time.Date(2026, 10, 1, 8, 0, 0, 0, time.UTC)))
@@ -608,5 +611,26 @@ var _ = Describe("Headscale backup reconciliation", func() {
 		reconcileOnce()
 		Expect(archivingCondition().Reason).To(Equal("ObjectStoreUnreachable"))
 		Expect(getStatefulSet().Spec.Template.Spec.InitContainers).To(HaveLen(2))
+	})
+})
+
+var _ = Describe("Headscale watch", func() {
+	update := func(mutate func(h *headscalev1beta1.Headscale)) bool {
+		old := &headscalev1beta1.Headscale{}
+		old.Generation = 1
+		h := old.DeepCopy()
+		mutate(h)
+		return reconcilableUpdates.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: h})
+	}
+
+	It("ignores the controller's own status patches", func() {
+		Expect(update(func(h *headscalev1beta1.Headscale) {
+			h.Status.Backup = &headscalev1beta1.BackupStatus{LastSuccessfulBackup: &metav1.Time{Time: time.Now()}}
+		})).To(BeFalse())
+	})
+
+	It("reconciles spec changes and deletion", func() {
+		Expect(update(func(h *headscalev1beta1.Headscale) { h.Generation = 2 })).To(BeTrue())
+		Expect(update(func(h *headscalev1beta1.Headscale) { h.DeletionTimestamp = &metav1.Time{Time: time.Now()} })).To(BeTrue())
 	})
 })

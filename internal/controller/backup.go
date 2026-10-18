@@ -546,8 +546,10 @@ func (r *HeadscaleReconciler) computeArchivingCondition(ctx context.Context, h *
 	if reason, message := replicationProblem(h, in.Heartbeat, time.Now()); reason != "" {
 		return cond(metav1.ConditionFalse, reason, "%s", message)
 	}
-	return cond(metav1.ConditionTrue, "Archiving", "Archiving to %s; last backup at %s",
-		h.Spec.Backup.ObjectStore.DestinationPath, in.LastBackup.UTC().Format(time.RFC3339))
+	// The message stays constant while archiving: the time of the last backup
+	// is in status.backup, and a changing message would patch the status on
+	// every reconcile.
+	return cond(metav1.ConditionTrue, "Archiving", "Archiving to %s", h.Spec.Backup.ObjectStore.DestinationPath)
 }
 
 // replicationProblem judges the backup-agent's heartbeat. The operator can

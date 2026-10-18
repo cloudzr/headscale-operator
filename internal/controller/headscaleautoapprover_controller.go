@@ -314,13 +314,14 @@ func (r *HeadscaleAutoApproverReconciler) requeueApproversForHeadscale(
 	return requests
 }
 
-// reconcilableUpdates filters Update events on the For() watch so the
-// controller only reconciles on changes that actually require work: spec edits
+// reconcilableUpdates filters Update events on a For() watch so a controller
+// only reconciles on changes that actually require work: spec edits
 // (generation bumps) and deletion-timestamp transitions. Status-only patches
 // (our own setCondition writes) and finalizer-only edits (our own
-// ensureFinalizer writes) are filtered out so we don't re-push the policy in
-// response to the controller's own writes — without this, a single user
-// `kubectl apply` triggers 3-4 redundant SetPolicy round-trips.
+// ensureFinalizer writes) are filtered out so a controller doesn't react to its
+// own writes — without this, a single user `kubectl apply` triggers 3-4
+// redundant SetPolicy round-trips here, and the Headscale controller, whose
+// status.backup tracks the archive, would reconcile in a loop.
 var reconcilableUpdates = predicate.Funcs{
 	UpdateFunc: func(e event.UpdateEvent) bool {
 		if e.ObjectOld == nil || e.ObjectNew == nil {

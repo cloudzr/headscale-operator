@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -818,7 +819,9 @@ func labelsForHeadscale(name string) map[string]string {
 // SetupWithManager sets up the controller with the Manager.
 func (r *HeadscaleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&headscalev1beta1.Headscale{}).
+		// Status patches must not re-trigger a reconcile: status.backup changes
+		// whenever the archive does, which would loop on every new object.
+		For(&headscalev1beta1.Headscale{}, builder.WithPredicates(reconcilableUpdates)).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&batchv1.Job{}).
 		Owns(&corev1.Service{}).
