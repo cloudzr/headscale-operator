@@ -369,6 +369,8 @@ var _ = Describe("Headscale backup reconciliation", func() {
 		Expect(archive.WriteManifest(ctx, store, m)).To(Succeed())
 	}
 
+	foreignOwner := archive.Marker{Namespace: "other", Name: "hs", UID: "someone-else"}
+
 	heartbeat := func(at time.Time) {
 		data, err := json.Marshal(archive.Heartbeat{At: at, LocalTXID: 2, ArchivedTXID: 2})
 		Expect(err).NotTo(HaveOccurred())
@@ -583,7 +585,7 @@ var _ = Describe("Headscale backup reconciliation", func() {
 	})
 
 	It("refuses an archive owned by another instance", func() {
-		Expect(archive.Claim(ctx, store, archive.Marker{Namespace: "other", Name: "hs", UID: "someone-else"})).To(Succeed())
+		Expect(archive.Claim(ctx, store, foreignOwner)).To(Succeed())
 		create(backupConfigJSON, backupSpec("s3://bucket/taken"))
 		reconcileOnce()
 		cond := archivingCondition()
@@ -602,6 +604,57 @@ var _ = Describe("Headscale backup reconciliation", func() {
 
 		store.Err = nil
 		reconcileOnce()
+		Expect(getStatefulSet().Spec.Template.Spec.InitContainers).To(HaveLen(2))
+	})
+
+	It("removes the sidecars when another instance takes the archive over", func() {
+		create(backupConfigJSON, backupSpec("s3://bucket/taken-over"))
+		reconcileOnce()
+		Expect(getStatefulSet().Spec.Template.Spec.InitContainers).To(HaveLen(2))
+
+		By("someone deleting the marker and another instance claiming the path")
+		store.Delete(archive.MarkerKey)
+		Expect(archive.Claim(ctx, store, foreignOwner)).To(Succeed())
+		reconcileOnce()
+		Expect(archivingCondition().Reason).To(Equal("ArchiveInUse"))
+		Expect(getStatefulSet().Spec.Template.Spec.InitContainers).To(BeEmpty(), "two writers would corrupt the archive")
+		Expect(litestreamConfigMapExists()).To(BeFalse())
+		Expect(getHeadscale().Status.Backup).To(BeNil())
+	})
+
+	It("claims the archive again when the endpoint changes", func() {
+		const otherEndpoint = "https://other.example.com"
+		other := &objectstore.Memory{}
+		r.NewObjectStore = func(cfg objectstore.Config) (objectstore.Store, error) {
+			if cfg.Endpoint == otherEndpoint {
+				return other, nil
+			}
+			return store, nil
+		}
+		Expect(archive.Claim(ctx, other, foreignOwner)).To(Succeed())
+
+		backup := backupSpec("s3://bucket/moved")
+		create(backupConfigJSON, backup)
+		reconcileOnce()
+		Expect(getHeadscale().Status.Backup.EndpointURL).To(Equal(backup.ObjectStore.EndpointURL))
+
+		updateSpec(func(h *headscalev1beta1.Headscale) {
+			h.Spec.Backup.ObjectStore.EndpointURL = otherEndpoint
+		})
+		reconcileOnce()
+		Expect(archivingCondition().Reason).To(Equal("ArchiveInUse"), "the same path on another store is another archive")
+		Expect(getStatefulSet().Spec.Template.Spec.InitContainers).To(BeEmpty())
+		Expect(getHeadscale().Status.Backup).To(BeNil())
+	})
+
+	It("re-writes a deleted marker", func() {
+		create(backupConfigJSON, backupSpec("s3://bucket/marker-lost"))
+		reconcileOnce()
+		store.Delete(archive.MarkerKey)
+		reconcileOnce()
+		marker, err := archive.ReadMarker(ctx, store)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(marker.UID).To(Equal(string(getHeadscale().UID)))
 		Expect(getStatefulSet().Spec.Template.Spec.InitContainers).To(HaveLen(2))
 	})
 

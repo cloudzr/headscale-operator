@@ -61,6 +61,10 @@ const (
 // ErrArchiveInUse is returned when another instance owns the archive.
 var ErrArchiveInUse = errors.New("archive is owned by another Headscale instance")
 
+// ClaimSettleDelay is how long Claim waits after writing the marker before
+// reading it a second time. Tests shorten it.
+var ClaimSettleDelay = 5 * time.Second
+
 // KeyObject returns the object key holding the private key of role.
 func KeyObject(role string) string { return keysPrefix + role + ".key" }
 
@@ -124,8 +128,13 @@ func ReadMarker(ctx context.Context, store objectstore.Store) (*Marker, error) {
 // writes in one archive.
 //
 // The marker is written with a conditional put, so of two instances racing
-// for an unclaimed archive only one wins. It is then read back, which also
-// settles the race on stores that don't support conditional writes.
+// for an unclaimed archive only one wins. Some S3-compatible stores ignore the
+// condition and overwrite, and then both writers would read back their own
+// marker. A rival can only have written blindly if it found no marker either,
+// so its write lands within a request's latency of ours: reading the marker
+// again after ClaimSettleDelay sees the last writer, and only that one wins.
+// Callers should still call Claim on every reconcile, to notice a claim lost
+// later on.
 func Claim(ctx context.Context, store objectstore.Store, owner Marker) error {
 	current, err := ReadMarker(ctx, store)
 	if err != nil {
@@ -139,17 +148,32 @@ func Claim(ctx context.Context, store objectstore.Store, owner Marker) error {
 		if err := store.PutIfAbsent(ctx, MarkerKey, data); err != nil && !errors.Is(err, objectstore.ErrExists) {
 			return err
 		}
-		if current, err = ReadMarker(ctx, store); err != nil {
+		if current, err = readMarkerAfterWrite(ctx, store); err != nil {
 			return err
 		}
-		if current == nil {
-			return fmt.Errorf("%s not found after writing it", MarkerKey)
+		if current.UID == owner.UID && ClaimSettleDelay > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(ClaimSettleDelay):
+			}
+			if current, err = readMarkerAfterWrite(ctx, store); err != nil {
+				return err
+			}
 		}
 	}
 	if current.UID != owner.UID {
 		return fmt.Errorf("%w: %s", ErrArchiveInUse, current)
 	}
 	return nil
+}
+
+func readMarkerAfterWrite(ctx context.Context, store objectstore.Store) (*Marker, error) {
+	m, err := ReadMarker(ctx, store)
+	if err == nil && m == nil {
+		return nil, fmt.Errorf("%s not found after writing it", MarkerKey)
+	}
+	return m, err
 }
 
 // Inspection summarizes the contents of an archive.

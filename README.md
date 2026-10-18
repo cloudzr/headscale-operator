@@ -633,6 +633,7 @@ kubectl get headscale -n headscale
 kubectl get headscale headscale -n headscale -o jsonpath='{.status.backup}' | jq
 # {
 #   "destination_path": "s3://my-bucket/headscale/prod",
+#   "endpoint_url": "https://minio.storage.svc:9000",
 #   "first_recoverability_point": "2026-10-01T08:00:00Z",
 #   "last_successful_backup": "2026-10-18T12:00:01Z",
 #   "keys_archived": true
@@ -652,10 +653,10 @@ The `ContinuousArchiving` condition is `True` once the sidecars run, a base snap
 | `Suspended` (`Unknown`) | `replicas: 0`: no pod runs, so nothing is archived |
 | `CredentialsMissing` | The credentials Secret or key does not exist |
 | `ObjectStoreUnreachable` | The archive could not be read or written |
-| `ArchiveInUse` | Another Headscale instance owns `destination_path` |
+| `ArchiveInUse` | Another Headscale instance owns `destination_path` on this endpoint. An instance that loses its claim stops archiving: its sidecars are removed |
 | `UnsupportedDatabase`, `WALDisabled`, `MissingSetting`, `UnsupportedPath`, `PortConflict`, `UnsupportedVersion` | `spec.config` or `spec.version` cannot be archived (see Requirements) |
 
-Backup problems never take Headscale down: the sidecars have no readiness probes and keep retrying, and once an archive is claimed, credential or object store errors are only reported, never acted upon.
+Backup problems never take Headscale down: the sidecars have no readiness probes and keep retrying, and once an archive is claimed, credential or object store errors are only reported, never acted upon. The one exception is losing the archive to another instance, which removes the sidecars: two writers would corrupt the archive for both.
 
 #### Recovering an Instance
 
@@ -714,7 +715,7 @@ A complete example is in [config/samples/headscale_v1beta1_headscale_recovery.ya
 
 #### Safety Guarantees
 
-- **One writer per archive.** The first instance archiving to a path records itself in `.headscale-operator.json`, written with a conditional put (`If-None-Match`) and read back, so of two instances racing for a path only one wins. Any other instance pointed at it reports `ArchiveInUse` and does not archive.
+- **One writer per archive.** The first instance archiving to a path records itself in `.headscale-operator.json`, written with a conditional put (`If-None-Match`). Some S3-compatible stores ignore the condition and overwrite. To cover them, the operator reads the marker back a few seconds after writing it, so only the last of two racing writers wins. The claim is checked again on every reconcile. Any other instance pointed at the archive reports `ArchiveInUse` and does not archive, and an instance whose marker is replaced stops archiving. An archive is a path on an endpoint: the same path on another endpoint is claimed separately.
 - **The recovery source is read-only.** The CRD rejects a `backup.object_store.destination_path` that equals, contains or is contained in the recovery source path (on the same endpoint), so a recovered instance always starts a fresh archive.
 - **Existing data is never overwritten.** Recovery only writes into a PVC it created itself, and the agent refuses to replace an existing database.
 - **No silent identity change.** A recovery fails rather than proceed without the noise key. (The DERP key is optional: clients learn a new one from the DERP map.)
@@ -759,7 +760,7 @@ While backup is enabled, the `<name>-metrics` Service also exposes Litestream's 
 
 - **Rotating the S3 credentials.** The sidecars read the Secret when the pod starts. After changing it, restart the pod (`kubectl rollout restart statefulset/<name>`). Until then the condition reports `AgentNotReporting` if the old keys stop working.
 - **Re-creating a Headscale resource** (delete and create, a GitOps re-sync after a cluster rebuild, a Velero restore) creates a new instance with a new UID. It reports `ArchiveInUse` on the old path, by design: point `backup` at a new path, or recover from the old archive with `bootstrap.recovery`. If the previous instance is gone for good and you want to keep writing to the same path, delete `<path>/.headscale-operator.json` yourself.
-- **Changing `destination_path`** claims the new path. Until that succeeds, nothing is archived: the sidecars are removed and `status.backup` is cleared.
+- **Changing `destination_path` or `endpoint_url`** claims the new archive. Until that succeeds, nothing is archived: the sidecars are removed and `status.backup` is cleared.
 - **`external_backups` entries used by `bootstrap.recovery` cannot be removed**, since `bootstrap` is immutable and must keep pointing at an existing source. Keep the entry (and its Secret reference) for the lifetime of the resource.
 
 #### Disaster Recovery Runbook

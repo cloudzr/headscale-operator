@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	headscalev1beta1 "github.com/infradohq/headscale-operator/api/v1beta1"
+	"github.com/infradohq/headscale-operator/internal/archive"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -47,6 +48,8 @@ func TestControllers(t *testing.T) {
 
 var _ = BeforeSuite(func() {
 	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
+	// Claims are settled by the archive tests; don't wait on every reconcile.
+	archive.ClaimSettleDelay = 0
 
 	ctx, cancel = context.WithCancel(context.TODO())
 

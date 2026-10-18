@@ -387,22 +387,25 @@ type backupState struct {
 // the archive. The sidecars are first added once the archive is known to be
 // owned by this instance. The claim is remembered in status.backup: from then
 // on credential or object store problems are only reported, and never remove
-// the running sidecars (which would roll the pod).
+// the running sidecars (which would roll the pod). The claim is checked again
+// on every reconcile, and losing it to another instance does remove them: two
+// writers would corrupt the archive for both.
 func (r *HeadscaleReconciler) prepareBackup(ctx context.Context, h *headscalev1beta1.Headscale, view headscaleConfigView) backupState {
 	b := h.Spec.Backup
 	if b == nil {
 		return backupState{}
 	}
+	log := logf.FromContext(ctx)
 	state := backupState{status: h.Status.Backup.DeepCopy()}
-	dest := b.ObjectStore.DestinationPath
-	claimed := state.status != nil && state.status.DestinationPath == dest
+	dest, endpoint := b.ObjectStore.DestinationPath, b.ObjectStore.EndpointURL
+	claimed := state.status != nil && state.status.DestinationPath == dest && state.status.EndpointURL == endpoint
 	fail := func(reason, message string) backupState {
 		cond := newCondition(h, continuousArchivingConditionType, metav1.ConditionFalse, reason, message)
 		state.cond = &cond
 		if !claimed {
 			// status.backup names the archive this instance writes to: none
 			// until destination_path is claimed.
-			state.status = nil
+			state.status, state.plan = nil, nil
 		}
 		return state
 	}
@@ -422,9 +425,6 @@ func (r *HeadscaleReconciler) prepareBackup(ctx context.Context, h *headscalev1b
 	if state.store, err = r.objectStoreFor(ctx, h.Namespace, b.ObjectStore); err != nil {
 		return fail(conditionReason(err, "ObjectStoreUnreachable"), err.Error())
 	}
-	if claimed {
-		return state
-	}
 
 	claimCtx, cancel := context.WithTimeout(ctx, objectStoreTimeout)
 	defer cancel()
@@ -436,14 +436,24 @@ func (r *HeadscaleReconciler) prepareBackup(ctx context.Context, h *headscalev1b
 	})
 	switch {
 	case errors.Is(err, archive.ErrArchiveInUse):
+		if claimed {
+			log.Info("Lost backup archive to another instance; removing the backup sidecars", "destination", dest)
+			claimed = false
+		}
 		return fail("ArchiveInUse", err.Error()+
 			"; choose another backup.object_store.destination_path (a re-created Headscale resource is another instance:"+
 			" archive to a new path, or delete the marker if the previous owner is gone for good)")
+	case err != nil && claimed:
+		// Reported by computeArchivingCondition, which can't reach the
+		// archive either.
+		return state
 	case err != nil:
 		return fail("ObjectStoreUnreachable", fmt.Sprintf("Could not claim the archive: %v", err))
 	}
-	logf.FromContext(ctx).Info("Claimed backup archive", "destination", dest)
-	state.status = &headscalev1beta1.BackupStatus{DestinationPath: dest}
+	if !claimed {
+		log.Info("Claimed backup archive", "destination", dest, "endpoint", endpoint)
+		state.status = &headscalev1beta1.BackupStatus{DestinationPath: dest, EndpointURL: endpoint}
+	}
 	state.plan, state.litestreamConfig = &plan, rendered
 	return state
 }

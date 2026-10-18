@@ -2824,6 +2824,12 @@ spec:
                     description: DestinationPath is the archive this instance writes
                       to.
                     type: string
+                  endpoint_url:
+                    description: |-
+                      EndpointURL is the endpoint of that archive, empty for AWS S3. The
+                      claim belongs to the store as well as the path: another endpoint is
+                      another archive.
+                    type: string
                   first_recoverability_point:
                     description: |-
                       FirstRecoverabilityPoint is the earliest time the database can be

@@ -352,6 +352,12 @@ type BackupStatus struct {
 	// +optional
 	DestinationPath string `json:"destination_path,omitempty"`
 
+	// EndpointURL is the endpoint of that archive, empty for AWS S3. The
+	// claim belongs to the store as well as the path: another endpoint is
+	// another archive.
+	// +optional
+	EndpointURL string `json:"endpoint_url,omitempty"`
+
 	// FirstRecoverabilityPoint is the earliest time the database can be
 	// recovered to.
 	// +optional

@@ -14,6 +14,8 @@ import (
 	"github.com/infradohq/headscale-operator/internal/objectstore"
 )
 
+const rivalUID = "uid-2"
+
 var _ = Describe("Claim", func() {
 	ctx := context.Background()
 	owner := Marker{Namespace: "ns", Name: "hs", UID: "uid-1"}
@@ -35,7 +37,7 @@ var _ = Describe("Claim", func() {
 
 	It("refuses an archive owned by another instance", func() {
 		store := &objectstore.Memory{}
-		Expect(Claim(ctx, store, Marker{Namespace: "ns", Name: "other", UID: "uid-2"})).To(Succeed())
+		Expect(Claim(ctx, store, Marker{Namespace: "ns", Name: "other", UID: rivalUID})).To(Succeed())
 		err := Claim(ctx, store, owner)
 		Expect(errors.Is(err, ErrArchiveInUse)).To(BeTrue())
 		Expect(err.Error()).To(ContainSubstring("ns/other"))
@@ -47,15 +49,46 @@ var _ = Describe("Claim", func() {
 	})
 
 	It("loses a race against an instance that claimed in between", func() {
-		store := &racingStore{Memory: &objectstore.Memory{}, rival: Marker{Namespace: "ns", Name: "rival", UID: "uid-2"}}
+		store := &racingStore{Memory: &objectstore.Memory{}, rival: Marker{Namespace: "ns", Name: "rival", UID: rivalUID}}
 		err := Claim(ctx, store, owner)
 		Expect(errors.Is(err, ErrArchiveInUse)).To(BeTrue())
 		Expect(err.Error()).To(ContainSubstring("ns/rival"))
 		m, err := ReadMarker(ctx, store)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(m.UID).To(Equal("uid-2"), "the rival's marker is kept")
+		Expect(m.UID).To(Equal(rivalUID), "the rival's marker is kept")
+	})
+
+	It("loses to a rival that overwrote the marker on a store ignoring conditional writes", func() {
+		store := &blindStore{Memory: &objectstore.Memory{}, rival: Marker{Namespace: "ns", Name: "rival", UID: rivalUID}}
+		err := Claim(ctx, store, owner)
+		Expect(errors.Is(err, ErrArchiveInUse)).To(BeTrue(), "the first read-back still showed our marker")
+		Expect(err.Error()).To(ContainSubstring("ns/rival"))
 	})
 })
+
+// blindStore ignores conditional writes, like some S3-compatible stores, and
+// lets rival overwrite the marker right after the first read-back.
+type blindStore struct {
+	*objectstore.Memory
+	rival  Marker
+	reads  int
+	writes int
+}
+
+func (s *blindStore) PutIfAbsent(ctx context.Context, key string, data []byte) error {
+	s.writes++
+	return s.Put(ctx, key, data)
+}
+
+func (s *blindStore) Get(ctx context.Context, key string) ([]byte, error) {
+	data, err := s.Memory.Get(ctx, key)
+	if key == MarkerKey && s.writes > 0 {
+		if s.reads++; s.reads == 1 {
+			Expect(writeJSON(ctx, s.Memory, MarkerKey, s.rival)).To(Succeed())
+		}
+	}
+	return data, err
+}
 
 // racingStore claims the archive for rival right before the first
 // conditional write, as a concurrent instance would.
