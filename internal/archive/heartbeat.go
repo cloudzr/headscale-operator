@@ -39,7 +39,8 @@ const litestreamTXIDMetric = "litestream_txid"
 // Heartbeat is what the backup-agent reports from inside the headscale pod,
 // with the pod's own credentials. A recent heartbeat proves the pod can still
 // write to the archive. LaggingSince tells whether Litestream keeps up: an
-// idle database is not lagging, so it never raises a false alarm.
+// idle database is not lagging, and neither is a busy one whose archive keeps
+// advancing, so neither raises a false alarm.
 type Heartbeat struct {
 	At time.Time `json:"at"`
 	// LocalTXID is Litestream's position in the local database, 0 when
@@ -47,8 +48,8 @@ type Heartbeat struct {
 	LocalTXID uint64 `json:"localTXID"`
 	// ArchivedTXID is the highest transaction in the archive.
 	ArchivedTXID uint64 `json:"archivedTXID"`
-	// LaggingSince is when the archive fell behind the local database
-	// without catching up since.
+	// LaggingSince is when the archive was last seen behind a local position
+	// that it has not reached since.
 	LaggingSince *time.Time `json:"laggingSince,omitempty"`
 	// Error explains why the local position could not be read.
 	Error string `json:"error,omitempty"`
@@ -98,6 +99,8 @@ type ReplicationReporter struct {
 	Now func() time.Time
 
 	laggingSince *time.Time
+	// lagTarget is the local position when laggingSince was recorded.
+	lagTarget uint64
 }
 
 // Report writes a heartbeat. An error means the heartbeat could not be
@@ -120,12 +123,16 @@ func (r *ReplicationReporter) Report(ctx context.Context) (Heartbeat, error) {
 		hb.Error = err.Error()
 	} else {
 		hb.LocalTXID = local
+		// On a busy database the archive is nearly always a few transactions
+		// behind when sampled. Lag only counts while the archive hasn't
+		// reached the local position seen when it started: once it has, a
+		// new window starts from the current position.
 		switch {
 		case local <= hb.ArchivedTXID:
 			r.laggingSince = nil
-		case r.laggingSince == nil:
+		case r.laggingSince == nil || hb.ArchivedTXID >= r.lagTarget:
 			at := hb.At
-			r.laggingSince = &at
+			r.laggingSince, r.lagTarget = &at, local
 		}
 	}
 	hb.LaggingSince = r.laggingSince

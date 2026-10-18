@@ -639,7 +639,7 @@ kubectl get headscale headscale -n headscale -o jsonpath='{.status.backup}' | jq
 # }
 ```
 
-The `ContinuousArchiving` condition is `True` once the sidecars run, a base snapshot is in the archive, all keys are archived and the backup-agent's heartbeat shows that the pod keeps up. The heartbeat matters because the operator and the pod reach the archive independently: the pod keeps the credentials it started with and has its own network path, so an archive the operator can read says nothing about the pod still writing to it. The agent compares Litestream's position in the local database with the newest transaction in the archive. An idle database is not lagging, so a quiet instance never looks stale. Otherwise the reason says why:
+The `ContinuousArchiving` condition is `True` once the sidecars run, a base snapshot is in the archive, all keys are archived and the backup-agent's heartbeat shows that the pod keeps up. The heartbeat matters because the operator and the pod reach the archive independently: the pod keeps the credentials it started with and has its own network path, so an archive the operator can read says nothing about the pod still writing to it. The agent compares Litestream's position in the local database with the newest transaction in the archive. An idle database is not lagging, so a quiet instance never looks stale; a busy one only counts as lagging while the archive fails to reach a position the database had reached earlier, so being a few transactions behind at every check is not a stall. Otherwise the reason says why:
 
 | Reason | Meaning |
 |--------|---------|
@@ -647,7 +647,7 @@ The `ContinuousArchiving` condition is `True` once the sidecars run, a base snap
 | `NoBaseSnapshot` | Waiting for Litestream to upload the first snapshot |
 | `KeysNotArchived` | Waiting for Headscale to generate, or the agent to upload, a private key |
 | `AgentNotReporting` | No heartbeat from the backup-agent for 3 minutes: the pod cannot write to the archive (revoked or rotated credentials, network, permissions) |
-| `ReplicationStalled` | Litestream has not shipped the latest transactions for longer than `max(2m, 3 × sync_interval)` |
+| `ReplicationStalled` | The archive has not reached a transaction the local database had for longer than `max(2m, 3 × sync_interval)` |
 | `ReplicationUnknown` | The agent cannot read Litestream's metrics |
 | `Suspended` (`Unknown`) | `replicas: 0`: no pod runs, so nothing is archived |
 | `CredentialsMissing` | The credentials Secret or key does not exist |

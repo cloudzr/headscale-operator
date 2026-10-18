@@ -3,8 +3,10 @@ package archive
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"time"
 
@@ -116,6 +118,35 @@ var _ = Describe("ReplicationReporter", func() {
 		store.SetObject("db/0000/0000000000000006-0000000000000009.ltx", nil, now)
 		now = now.Add(time.Second)
 		Expect(report().LaggingSince).To(BeNil())
+	})
+
+	It("is not lagging while a busy database's archive keeps advancing", func() {
+		start := now
+		for i := uint64(1); i <= 10; i++ {
+			// Every sample finds the archive one transaction behind, but past
+			// what was local at the previous sample.
+			archived := i * 100
+			store.SetObject(fmt.Sprintf("db/0000/%016x-%016x.ltx", archived-99, archived), nil, now)
+			local = strconv.FormatUint(archived+1, 10)
+			hb := report()
+			Expect(hb.LaggingSince).NotTo(BeNil())
+			Expect(*hb.LaggingSince).To(BeTemporally("==", now), "a new lag window starts at each sample")
+			now = now.Add(30 * time.Second)
+		}
+		Expect(now.Sub(start)).To(BeNumerically(">", 2*time.Minute))
+	})
+
+	It("keeps the lag window while the archive doesn't reach the position it started at", func() {
+		store.SetObject("db/0000/0000000000000001-0000000000000064.ltx", nil, now)
+		local = "200"
+		start := now
+		report()
+
+		By("advancing, but not as far as transaction 200")
+		now = now.Add(time.Minute)
+		store.SetObject("db/0000/0000000000000065-0000000000000096.ltx", nil, now)
+		local = "300"
+		Expect(*report().LaggingSince).To(BeTemporally("==", start))
 	})
 
 	It("reports unreadable Litestream metrics without failing", func() {
