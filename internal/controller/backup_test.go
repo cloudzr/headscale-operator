@@ -269,6 +269,16 @@ var _ = Describe("Headscale backup reconciliation", func() {
 		return sts
 	}
 
+	metricsPorts := func() []string {
+		svc := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-metrics", Namespace: namespace}, svc)).To(Succeed())
+		names := make([]string, 0, len(svc.Spec.Ports))
+		for _, p := range svc.Spec.Ports {
+			names = append(names, p.Name)
+		}
+		return names
+	}
+
 	litestreamConfigMapExists := func() bool {
 		err := k8sClient.Get(ctx, types.NamespacedName{Name: name + "-litestream", Namespace: namespace}, &corev1.ConfigMap{})
 		return err == nil
@@ -358,6 +368,8 @@ var _ = Describe("Headscale backup reconciliation", func() {
 			&corev1.ConfigMap{Name: name + "-config", Namespace: namespace},
 			&corev1.ConfigMap{Name: name + "-litestream", Namespace: namespace},
 			&corev1.Pod{Name: name + "-0", Namespace: namespace},
+			&corev1.Service{Name: name, Namespace: namespace},
+			&corev1.Service{Name: name + "-metrics", Namespace: namespace},
 		} {
 			_ = k8sClient.Delete(ctx, obj, client.GracePeriodSeconds(0))
 		}
@@ -370,6 +382,7 @@ var _ = Describe("Headscale backup reconciliation", func() {
 		Expect(litestreamConfigMapExists()).To(BeFalse())
 		Expect(archivingCondition()).To(BeNil())
 		Expect(getHeadscale().Status.Backup).To(BeNil())
+		Expect(metricsPorts()).To(ConsistOf("metrics"))
 		Expect(store.Puts).To(BeEmpty(), "the object store is never touched")
 	})
 
@@ -392,6 +405,9 @@ var _ = Describe("Headscale backup reconciliation", func() {
 		cond := archivingCondition()
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(cond.Reason).To(Equal("SidecarNotReady"))
+
+		By("exposing Litestream's metrics next to headscale's")
+		Expect(metricsPorts()).To(ConsistOf("metrics", "litestream"))
 
 		By("reconciling again without claiming twice")
 		reconcileOnce()
@@ -443,6 +459,7 @@ var _ = Describe("Headscale backup reconciliation", func() {
 		Expect(litestreamConfigMapExists()).To(BeFalse())
 		Expect(archivingCondition()).To(BeNil())
 		Expect(getHeadscale().Status.Backup).To(BeNil())
+		Expect(metricsPorts()).To(ConsistOf("metrics"))
 	})
 
 	DescribeTable("refuses configurations it cannot archive",

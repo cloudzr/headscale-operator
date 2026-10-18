@@ -206,7 +206,7 @@ func (r *HeadscaleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	// Reconcile Metrics Service
-	if err := r.reconcileMetricsService(ctx, headscale, view); err != nil {
+	if err := r.reconcileMetricsService(ctx, headscale, view, backup); err != nil {
 		log.Error(err, "Failed to reconcile Metrics Service")
 		return ctrl.Result{}, err
 	}
@@ -360,9 +360,23 @@ func (r *HeadscaleReconciler) reconcileService(ctx context.Context, headscale *h
 	return r.applyResource(ctx, headscale, service)
 }
 
-// reconcileMetricsService reconciles the Metrics Service for Headscale
-func (r *HeadscaleReconciler) reconcileMetricsService(ctx context.Context, headscale *headscalev1beta1.Headscale, view headscaleConfigView) error {
+// reconcileMetricsService reconciles the Metrics Service for Headscale. While
+// the backup sidecars run it also exposes Litestream's metrics.
+func (r *HeadscaleReconciler) reconcileMetricsService(
+	ctx context.Context,
+	headscale *headscalev1beta1.Headscale,
+	view headscaleConfigView,
+	backup backupState,
+) error {
 	metricsService := r.metricsServiceForHeadscale(headscale, view)
+	if backup.plan != nil {
+		metricsService.Spec.Ports = append(metricsService.Spec.Ports, corev1.ServicePort{
+			Name:       litestreamContainerName,
+			Port:       litestreamMetricsPort,
+			TargetPort: intstr.FromInt32(litestreamMetricsPort),
+			Protocol:   corev1.ProtocolTCP,
+		})
+	}
 	return r.applyResource(ctx, headscale, metricsService)
 }
 
