@@ -146,7 +146,7 @@ var _ = Describe("replicationProblem", func() {
 
 	DescribeTable("judges the backup-agent heartbeat",
 		func(syncInterval string, hb *archive.Heartbeat, reason string) {
-			got, message := replicationProblem(h(syncInterval), hb, now)
+			got, message := replicationProblem(h(syncInterval), hb, nil, now)
 			Expect(got).To(Equal(reason), message)
 		},
 		Entry("healthy", "1s", &archive.Heartbeat{At: now.Add(-20 * time.Second), LocalTXID: 9, ArchivedTXID: 9}, ""),
@@ -158,6 +158,16 @@ var _ = Describe("replicationProblem", func() {
 		Entry("lasting lag", "1s", &archive.Heartbeat{At: now, LocalTXID: 10, ArchivedTXID: 9, LaggingSince: since(5 * time.Minute)}, "ReplicationStalled"),
 		Entry("lag within 3x a long sync_interval", "10m", &archive.Heartbeat{At: now, LocalTXID: 10, ArchivedTXID: 9, LaggingSince: since(20 * time.Minute)}, ""),
 	)
+
+	It("judges the heartbeat's age by the store's clock, not the node's", func() {
+		ahead := &archive.Heartbeat{At: now.Add(time.Hour), LocalTXID: 9, ArchivedTXID: 9}
+		got, _ := replicationProblem(h("1s"), ahead, since(10*time.Minute), now)
+		Expect(got).To(Equal("AgentNotReporting"), "a node clock running ahead must not hide a stale heartbeat")
+
+		behind := &archive.Heartbeat{At: now.Add(-time.Hour), LocalTXID: 9, ArchivedTXID: 9}
+		got, message := replicationProblem(h("1s"), behind, since(20*time.Second), now)
+		Expect(got).To(BeEmpty(), message)
+	})
 })
 
 var _ = Describe("Backup rendering", func() {

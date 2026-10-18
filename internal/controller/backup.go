@@ -574,7 +574,7 @@ func (r *HeadscaleReconciler) computeArchivingCondition(ctx context.Context, h *
 	if len(missing) > 0 {
 		return cond(metav1.ConditionFalse, "KeysNotArchived", "Waiting for the %s private key(s) to be archived", strings.Join(missing, ", "))
 	}
-	if reason, message := replicationProblem(h, in.Heartbeat, time.Now()); reason != "" {
+	if reason, message := replicationProblem(h, in.Heartbeat, in.HeartbeatWritten, time.Now()); reason != "" {
 		return cond(metav1.ConditionFalse, reason, "%s", message)
 	}
 	// The message stays constant while archiving: the time of the last backup
@@ -586,16 +586,21 @@ func (r *HeadscaleReconciler) computeArchivingCondition(ctx context.Context, h *
 // replicationProblem judges the backup-agent's heartbeat. The operator can
 // reach the archive (it just inspected it), but the pod uses its own copy of
 // the credentials and its own network path: only the heartbeat shows that
-// the pod still archives. It returns an empty reason when replication is
-// healthy.
-func replicationProblem(h *headscalev1beta1.Headscale, hb *archive.Heartbeat, now time.Time) (reason, message string) {
+// the pod still archives. Its age is judged by the time the store received it
+// (written) when known, so that a skewed node clock can't make it look fresh
+// or stale. It returns an empty reason when replication is healthy.
+func replicationProblem(h *headscalev1beta1.Headscale, hb *archive.Heartbeat, written *time.Time, now time.Time) (reason, message string) {
 	if hb == nil {
 		return "AgentNotReporting", "The backup-agent has not reported yet: the pod may not reach the object store"
 	}
-	if age := now.Sub(hb.At); age > heartbeatStaleAfter {
+	reported := hb.At
+	if written != nil {
+		reported = *written
+	}
+	if age := now.Sub(reported); age > heartbeatStaleAfter {
 		return "AgentNotReporting", fmt.Sprintf(
 			"The backup-agent last reported at %s: the pod can no longer write to the archive (credentials, network or permissions)",
-			hb.At.UTC().Format(time.RFC3339))
+			reported.UTC().Format(time.RFC3339))
 	}
 	if hb.Error != "" {
 		return "ReplicationUnknown", "The backup-agent could not read Litestream's progress: " + hb.Error

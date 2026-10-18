@@ -136,6 +136,15 @@ var _ = Describe("Inspect", func() {
 		Expect(*in.LastBackup).To(Equal(t0.Add(5 * time.Hour)))
 	})
 
+	It("records when the store received the heartbeat", func() {
+		store := &objectstore.Memory{}
+		store.SetObject(HeartbeatKey, []byte(`{"at":"2020-01-01T00:00:00Z"}`), t0)
+		in, err := Inspect(ctx, store)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(in.Heartbeat.At.Year()).To(Equal(2020))
+		Expect(*in.HeartbeatWritten).To(Equal(t0))
+	})
+
 	It("does not mistake a sibling prefix for the database", func() {
 		store := &objectstore.Memory{}
 		store.SetObject("db2/0009/x.ltx", []byte("s"), t0)

@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -190,6 +191,9 @@ type Inspection struct {
 	Marker     *Marker
 	// Heartbeat is the backup-agent's latest report, or nil.
 	Heartbeat *Heartbeat
+	// HeartbeatWritten is when the object store received that report. Unlike
+	// Heartbeat.At it doesn't depend on the clock of the pod's node.
+	HeartbeatWritten *time.Time
 	// keySizes maps the key objects present in the archive to their size.
 	keySizes map[string]int64
 }
@@ -263,8 +267,18 @@ func Inspect(ctx context.Context, store objectstore.Store) (Inspection, error) {
 	if in.Marker, err = ReadMarker(ctx, store); err != nil {
 		return in, err
 	}
-	if in.Heartbeat, err = ReadHeartbeat(ctx, store); err != nil {
+	if in.Heartbeat, err = ReadHeartbeat(ctx, store); err != nil || in.Heartbeat == nil {
 		return in, err
+	}
+	agent, err := store.List(ctx, path.Dir(HeartbeatKey)+"/")
+	if err != nil {
+		return in, err
+	}
+	for _, obj := range agent {
+		if obj.Key == HeartbeatKey {
+			written := obj.LastModified
+			in.HeartbeatWritten = &written
+		}
 	}
 	return in, nil
 }
