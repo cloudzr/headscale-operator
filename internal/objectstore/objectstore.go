@@ -64,8 +64,7 @@ type Config struct {
 	// Endpoint is an optional S3-compatible endpoint URL (http or https).
 	Endpoint string
 	Region   string
-	// AccessKeyID and SecretAccessKey are static credentials. When both are
-	// empty the ambient AWS credential chain (env, IRSA, pod identity) is used.
+	// AccessKeyID and SecretAccessKey are the static credentials.
 	AccessKeyID     string
 	SecretAccessKey string
 }

@@ -55,7 +55,7 @@ Runs after `litestream restore -o <db>.restoring` and:
 
 ## Credentials
 
-The agent reads `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, the same variables as Litestream. Without them it uses the ambient AWS credential chain (IRSA, EKS Pod Identity, instance metadata).
+The agent reads the static keys from `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, the same variables as Litestream. The operator fills them from `s3_credentials`.
 
 ## Building
 

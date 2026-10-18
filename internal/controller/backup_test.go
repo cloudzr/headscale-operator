@@ -180,14 +180,6 @@ snapshot:
 		Expect(sts.Spec.Template.Annotations).To(HaveKey(backupConfigHashAnnotation))
 	})
 
-	It("passes no static credentials when inheriting the IAM role", func() {
-		h := newHeadscale()
-		h.Spec.Backup.ObjectStore.S3Credentials = headscalev1beta1.S3Credentials{InheritFromIAMRole: true}
-		for _, c := range render(&HeadscaleReconciler{}, h).Spec.Template.Spec.InitContainers {
-			Expect(c.Env).To(BeEmpty())
-		}
-	})
-
 	It("picks the backup-agent image from the spec, then the operator flag, then the default", func() {
 		h := newHeadscale()
 		Expect((&HeadscaleReconciler{}).backupAgentImageFor(h)).To(Equal(DefaultBackupAgentImage))

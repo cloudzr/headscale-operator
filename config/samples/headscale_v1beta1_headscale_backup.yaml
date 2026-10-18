@@ -50,7 +50,6 @@ spec:
         secret_access_key:
           name: headscale-backup-s3
           key: secret-access-key
-        # inherit_from_iam_role: true             # IRSA / pod identity instead of keys
     retention_policy: 720h       # keep 30 days of recovery points
     litestream:
       sync_interval: 1s          # bounds the data loss window

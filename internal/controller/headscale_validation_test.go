@@ -25,8 +25,8 @@ func validObjectStore(path string) headscalev1beta1.ObjectStoreConfig {
 		EndpointURL:     "http://s3.example.com:7070",
 		Region:          "us-east-1",
 		S3Credentials: headscalev1beta1.S3Credentials{
-			AccessKeyID:     &headscalev1beta1.SecretKeyReference{Name: "s3", Key: "id"},
-			SecretAccessKey: &headscalev1beta1.SecretKeyReference{Name: "s3", Key: testS3SecretKey},
+			AccessKeyID:     headscalev1beta1.SecretKeyReference{Name: "s3", Key: "id"},
+			SecretAccessKey: headscalev1beta1.SecretKeyReference{Name: "s3", Key: testS3SecretKey},
 		},
 	}
 }
@@ -71,32 +71,45 @@ var _ = Describe("Headscale CRD validation for backup and bootstrap", func() {
 		Entry("backup into a bucket root", func(h *headscalev1beta1.Headscale) {
 			h.Spec.Backup = &headscalev1beta1.BackupConfig{ObjectStore: validObjectStore("s3://bucket")}
 		}, ""),
-		Entry("backup with IAM role credentials", func(h *headscalev1beta1.Headscale) {
-			store := validObjectStore("s3://bucket/prod")
-			store.S3Credentials = headscalev1beta1.S3Credentials{InheritFromIAMRole: true}
-			h.Spec.Backup = &headscalev1beta1.BackupConfig{ObjectStore: store}
-		}, ""),
-		Entry("both credential modes set", func(h *headscalev1beta1.Headscale) {
-			store := validObjectStore("s3://bucket/prod")
-			store.S3Credentials.InheritFromIAMRole = true
-			h.Spec.Backup = &headscalev1beta1.BackupConfig{ObjectStore: store}
-		}, "set either access_key_id and secret_access_key, or inherit_from_iam_role"),
 		Entry("only one static key set", func(h *headscalev1beta1.Headscale) {
 			store := validObjectStore("s3://bucket/prod")
-			store.S3Credentials.SecretAccessKey = nil
+			store.S3Credentials.SecretAccessKey = headscalev1beta1.SecretKeyReference{}
 			h.Spec.Backup = &headscalev1beta1.BackupConfig{ObjectStore: store}
-		}, "set either access_key_id and secret_access_key, or inherit_from_iam_role"),
+		}, "secret_access_key"),
 		Entry("no credentials at all", func(h *headscalev1beta1.Headscale) {
 			store := validObjectStore("s3://bucket/prod")
 			store.S3Credentials = headscalev1beta1.S3Credentials{}
 			h.Spec.Backup = &headscalev1beta1.BackupConfig{ObjectStore: store}
-		}, "set either access_key_id and secret_access_key, or inherit_from_iam_role"),
+		}, "access_key_id"),
 		Entry("non-s3 destination scheme", func(h *headscalev1beta1.Headscale) {
 			h.Spec.Backup = &headscalev1beta1.BackupConfig{ObjectStore: validObjectStore("gs://bucket/prod")}
 		}, "destination_path"),
 		Entry("destination with trailing slash", func(h *headscalev1beta1.Headscale) {
 			h.Spec.Backup = &headscalev1beta1.BackupConfig{ObjectStore: validObjectStore("s3://bucket/prod/")}
 		}, "destination_path"),
+		Entry("endpoint with a trailing slash", func(h *headscalev1beta1.Headscale) {
+			store := validObjectStore("s3://bucket/prod")
+			store.EndpointURL = "http://s3.example.com:7070/"
+			h.Spec.Backup = &headscalev1beta1.BackupConfig{ObjectStore: store}
+		}, "endpoint_url"),
+		Entry("zero sync interval", func(h *headscalev1beta1.Headscale) {
+			h.Spec.Backup = &headscalev1beta1.BackupConfig{
+				ObjectStore: validObjectStore("s3://bucket/prod"),
+				Litestream:  headscalev1beta1.LitestreamConfig{SyncInterval: "0s"},
+			}
+		}, "sync_interval must be greater than 0"),
+		Entry("zero snapshot interval", func(h *headscalev1beta1.Headscale) {
+			h.Spec.Backup = &headscalev1beta1.BackupConfig{
+				ObjectStore: validObjectStore("s3://bucket/prod"),
+				Litestream:  headscalev1beta1.LitestreamConfig{SnapshotInterval: "0h0m"},
+			}
+		}, "snapshot_interval must be greater than 0"),
+		Entry("zero retention", func(h *headscalev1beta1.Headscale) {
+			h.Spec.Backup = &headscalev1beta1.BackupConfig{
+				ObjectStore:     validObjectStore("s3://bucket/prod"),
+				RetentionPolicy: "0s",
+			}
+		}, "retention_policy must be greater than 0"),
 		Entry("endpoint without scheme", func(h *headscalev1beta1.Headscale) {
 			store := validObjectStore("s3://bucket/prod")
 			store.EndpointURL = "s3.example.com"

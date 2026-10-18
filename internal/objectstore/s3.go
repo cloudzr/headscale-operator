@@ -59,18 +59,8 @@ func NewS3(cfg Config) (Store, error) {
 		lookup = minio.BucketLookupPath
 	}
 
-	var creds *credentials.Credentials
-	if cfg.AccessKeyID != "" || cfg.SecretAccessKey != "" {
-		creds = credentials.NewStaticV4(cfg.AccessKeyID, cfg.SecretAccessKey, "")
-	} else {
-		creds = credentials.NewChainCredentials([]credentials.Provider{
-			&credentials.EnvAWS{},
-			&credentials.IAM{},
-		})
-	}
-
 	client, err := minio.New(host, &minio.Options{
-		Creds:        creds,
+		Creds:        credentials.NewStaticV4(cfg.AccessKeyID, cfg.SecretAccessKey, ""),
 		Secure:       secure,
 		Region:       cfg.Region,
 		BucketLookup: lookup,

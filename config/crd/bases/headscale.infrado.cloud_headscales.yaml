@@ -262,6 +262,9 @@ spec:
                           format. Shorter intervals make restores faster.
                         pattern: ^([0-9]+(\.[0-9]+)?(s|m|h))+$
                         type: string
+                        x-kubernetes-validations:
+                        - message: snapshot_interval must be greater than 0
+                          rule: duration(self) > duration('0s')
                       sync_interval:
                         default: 1s
                         description: |-
@@ -269,6 +272,9 @@ spec:
                           in Go duration format. It bounds the data loss window.
                         pattern: ^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$
                         type: string
+                        x-kubernetes-validations:
+                        - message: sync_interval must be greater than 0
+                          rule: duration(self) > duration('0s')
                     type: object
                   object_store:
                     description: |-
@@ -289,8 +295,10 @@ spec:
                           (MinIO, Ceph RGW, Cloudflare R2, ...). Leave empty for AWS S3. The
                           operator reads the archive too, from its own namespace: for an
                           in-cluster store use the fully qualified <service>.<namespace>.svc name.
+                          Written without a trailing slash, so that two spellings of one endpoint
+                          can't bypass the recovery source overlap check.
                         maxLength: 512
-                        pattern: ^https?://[^/]+/?$
+                        pattern: ^https?://[^/]+$
                         type: string
                       region:
                         description: Region of the bucket.
@@ -318,11 +326,6 @@ spec:
                             - key
                             - name
                             type: object
-                          inherit_from_iam_role:
-                            description: |-
-                              InheritFromIAMRole uses the credentials provided by the pod's
-                              environment (e.g. IRSA) instead of static keys.
-                            type: boolean
                           secret_access_key:
                             description: SecretAccessKey references the Secret key
                               holding the S3 secret access key.
@@ -341,13 +344,10 @@ spec:
                             - key
                             - name
                             type: object
+                        required:
+                        - access_key_id
+                        - secret_access_key
                         type: object
-                        x-kubernetes-validations:
-                        - message: set either access_key_id and secret_access_key,
-                            or inherit_from_iam_role
-                          rule: '(has(self.inherit_from_iam_role) && self.inherit_from_iam_role)
-                            ? (!has(self.access_key_id) && !has(self.secret_access_key))
-                            : (has(self.access_key_id) && has(self.secret_access_key))'
                     required:
                     - destination_path
                     - s3_credentials
@@ -359,6 +359,9 @@ spec:
                       format (e.g. "720h" for 30 days).
                     pattern: ^([0-9]+(\.[0-9]+)?(s|m|h))+$
                     type: string
+                    x-kubernetes-validations:
+                    - message: retention_policy must be greater than 0
+                      rule: duration(self) > duration('0s')
                 required:
                 - object_store
                 type: object
@@ -446,8 +449,10 @@ spec:
                             (MinIO, Ceph RGW, Cloudflare R2, ...). Leave empty for AWS S3. The
                             operator reads the archive too, from its own namespace: for an
                             in-cluster store use the fully qualified <service>.<namespace>.svc name.
+                            Written without a trailing slash, so that two spellings of one endpoint
+                            can't bypass the recovery source overlap check.
                           maxLength: 512
-                          pattern: ^https?://[^/]+/?$
+                          pattern: ^https?://[^/]+$
                           type: string
                         region:
                           description: Region of the bucket.
@@ -475,11 +480,6 @@ spec:
                               - key
                               - name
                               type: object
-                            inherit_from_iam_role:
-                              description: |-
-                                InheritFromIAMRole uses the credentials provided by the pod's
-                                environment (e.g. IRSA) instead of static keys.
-                              type: boolean
                             secret_access_key:
                               description: SecretAccessKey references the Secret key
                                 holding the S3 secret access key.
@@ -498,13 +498,10 @@ spec:
                               - key
                               - name
                               type: object
+                          required:
+                          - access_key_id
+                          - secret_access_key
                           type: object
-                          x-kubernetes-validations:
-                          - message: set either access_key_id and secret_access_key,
-                              or inherit_from_iam_role
-                            rule: '(has(self.inherit_from_iam_role) && self.inherit_from_iam_role)
-                              ? (!has(self.access_key_id) && !has(self.secret_access_key))
-                              : (has(self.access_key_id) && has(self.secret_access_key))'
                       required:
                       - destination_path
                       - s3_credentials

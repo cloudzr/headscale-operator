@@ -213,10 +213,7 @@ func renderLitestreamConfig(b *headscalev1beta1.BackupConfig, plan backupPlan) (
 // starting; the ContinuousArchiving condition reports the missing Secret.
 func s3CredentialEnv(store headscalev1beta1.ObjectStoreConfig) []corev1.EnvVar {
 	creds := store.S3Credentials
-	if creds.InheritFromIAMRole || creds.AccessKeyID == nil || creds.SecretAccessKey == nil {
-		return nil
-	}
-	ref := func(name string, sel *headscalev1beta1.SecretKeyReference) corev1.EnvVar {
+	ref := func(name string, sel headscalev1beta1.SecretKeyReference) corev1.EnvVar {
 		return corev1.EnvVar{
 			Name: name,
 			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
@@ -399,14 +396,12 @@ func (r *HeadscaleReconciler) objectStoreFor(ctx context.Context, namespace stri
 		Region:          store.Region,
 	}
 	creds := store.S3Credentials
-	if !creds.InheritFromIAMRole && creds.AccessKeyID != nil && creds.SecretAccessKey != nil {
-		var err error
-		if cfg.AccessKeyID, err = r.secretValue(ctx, namespace, creds.AccessKeyID); err != nil {
-			return nil, err
-		}
-		if cfg.SecretAccessKey, err = r.secretValue(ctx, namespace, creds.SecretAccessKey); err != nil {
-			return nil, err
-		}
+	var err error
+	if cfg.AccessKeyID, err = r.secretValue(ctx, namespace, creds.AccessKeyID); err != nil {
+		return nil, err
+	}
+	if cfg.SecretAccessKey, err = r.secretValue(ctx, namespace, creds.SecretAccessKey); err != nil {
+		return nil, err
 	}
 	newStore := r.NewObjectStore
 	if newStore == nil {
@@ -415,7 +410,7 @@ func (r *HeadscaleReconciler) objectStoreFor(ctx context.Context, namespace stri
 	return newStore(cfg)
 }
 
-func (r *HeadscaleReconciler) secretValue(ctx context.Context, namespace string, ref *headscalev1beta1.SecretKeyReference) (string, error) {
+func (r *HeadscaleReconciler) secretValue(ctx context.Context, namespace string, ref headscalev1beta1.SecretKeyReference) (string, error) {
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: ref.Name}, secret); err != nil {
 		if apierrors.IsNotFound(err) {

@@ -581,6 +581,7 @@ Both sidecars are [native sidecars](https://kubernetes.io/docs/concepts/workload
 - `replicas: 1` (enforced by the CRD)
 - `database.type: sqlite` with write-ahead logging (Headscale's default), with the database under `/var/lib/headscale`
 - Keys stored outside `/var/lib/headscale` (for example mounted from a Secret) are considered managed by you and are neither archived nor restored
+- Static S3 credentials in a Secret of the Headscale's namespace. The sidecars, the recovery Job and the operator all use them; ambient cloud identities (IRSA, EKS Pod Identity, ...) are not supported
 - The object store must be reachable from the operator as well (it claims and inspects archives). For an in-cluster store, use the fully qualified service name (`<service>.<namespace>.svc`) in `endpoint_url`
 
 #### Enabling Continuous Backup
@@ -605,7 +606,6 @@ spec:
         secret_access_key:
           name: headscale-backup-s3
           key: secret-access-key
-        # inherit_from_iam_role: true   # use IRSA / pod identity instead of static keys
     retention_policy: 720h        # how long recovery points are kept (default 30 days)
     litestream:
       sync_interval: 1s           # bounds the data loss window (default 1s)

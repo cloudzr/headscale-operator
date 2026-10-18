@@ -21,8 +21,7 @@ limitations under the License.
 //	backup-agent restore      --destination s3://bucket/prefix --key noise=... --db /var/lib/headscale/db.sqlite
 //
 // Credentials are read from AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, the
-// same variables Litestream uses. When they are unset the ambient AWS
-// credential chain (IRSA, pod identity) is used.
+// same variables Litestream uses.
 package main
 
 import (

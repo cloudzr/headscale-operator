@@ -93,23 +93,17 @@ type SecretKeyReference struct {
 	Key string `json:"key"`
 }
 
-// S3Credentials configures how the backup components authenticate against
-// the object store. Either static keys or the ambient IAM role (IRSA, EKS Pod
-// Identity, GKE Workload Identity for S3-compatible endpoints) must be used.
-// +kubebuilder:validation:XValidation:rule="(has(self.inherit_from_iam_role) && self.inherit_from_iam_role) ? (!has(self.access_key_id) && !has(self.secret_access_key)) : (has(self.access_key_id) && has(self.secret_access_key))",message="set either access_key_id and secret_access_key, or inherit_from_iam_role"
+// S3Credentials references the static keys the backup components use to
+// authenticate against the object store. The operator reads the same keys to
+// claim and inspect archives.
 type S3Credentials struct {
 	// AccessKeyID references the Secret key holding the S3 access key ID.
-	// +optional
-	AccessKeyID *SecretKeyReference `json:"access_key_id,omitempty"`
+	// +required
+	AccessKeyID SecretKeyReference `json:"access_key_id"`
 
 	// SecretAccessKey references the Secret key holding the S3 secret access key.
-	// +optional
-	SecretAccessKey *SecretKeyReference `json:"secret_access_key,omitempty"`
-
-	// InheritFromIAMRole uses the credentials provided by the pod's
-	// environment (e.g. IRSA) instead of static keys.
-	// +optional
-	InheritFromIAMRole bool `json:"inherit_from_iam_role,omitempty"`
+	// +required
+	SecretAccessKey SecretKeyReference `json:"secret_access_key"`
 }
 
 // ObjectStoreConfig locates a backup archive in an S3-compatible object store.
@@ -126,7 +120,9 @@ type ObjectStoreConfig struct {
 	// (MinIO, Ceph RGW, Cloudflare R2, ...). Leave empty for AWS S3. The
 	// operator reads the archive too, from its own namespace: for an
 	// in-cluster store use the fully qualified <service>.<namespace>.svc name.
-	// +kubebuilder:validation:Pattern=`^https?://[^/]+/?$`
+	// Written without a trailing slash, so that two spellings of one endpoint
+	// can't bypass the recovery source overlap check.
+	// +kubebuilder:validation:Pattern=`^https?://[^/]+$`
 	// +kubebuilder:validation:MaxLength=512
 	// +optional
 	EndpointURL string `json:"endpoint_url,omitempty"`
@@ -153,6 +149,7 @@ type LitestreamConfig struct {
 	// SyncInterval is how often WAL changes are shipped to the object store,
 	// in Go duration format. It bounds the data loss window.
 	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$`
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="sync_interval must be greater than 0"
 	// +kubebuilder:default="1s"
 	// +optional
 	SyncInterval string `json:"sync_interval,omitempty"`
@@ -160,6 +157,7 @@ type LitestreamConfig struct {
 	// SnapshotInterval is how often a full snapshot is taken, in Go duration
 	// format. Shorter intervals make restores faster.
 	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(s|m|h))+$`
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="snapshot_interval must be greater than 0"
 	// +kubebuilder:default="24h"
 	// +optional
 	SnapshotInterval string `json:"snapshot_interval,omitempty"`
@@ -194,6 +192,7 @@ type BackupConfig struct {
 	// RetentionPolicy is how long recovery points are kept, in Go duration
 	// format (e.g. "720h" for 30 days).
 	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(s|m|h))+$`
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="retention_policy must be greater than 0"
 	// +kubebuilder:default="720h"
 	// +optional
 	RetentionPolicy string `json:"retention_policy,omitempty"`
