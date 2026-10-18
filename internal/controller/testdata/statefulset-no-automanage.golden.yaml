@@ -1,0 +1,94 @@
+metadata:
+  labels:
+    app.kubernetes.io/instance: headscale
+    app.kubernetes.io/managed-by: headscale-operator
+    app.kubernetes.io/name: headscale
+  name: headscale
+  namespace: headscale
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: headscale
+      app.kubernetes.io/managed-by: headscale-operator
+      app.kubernetes.io/name: headscale
+  serviceName: headscale
+  template:
+    metadata:
+      annotations:
+        headscale.infrado.cloud/config-hash: 3460b93b2726e844
+      labels:
+        app.kubernetes.io/instance: headscale
+        app.kubernetes.io/managed-by: headscale-operator
+        app.kubernetes.io/name: headscale
+    spec:
+      containers:
+      - command:
+        - headscale
+        - serve
+        image: headscale/headscale:v0.29.1
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        name: headscale
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        - containerPort: 9090
+          name: metrics
+          protocol: TCP
+        - containerPort: 50443
+          name: grpc
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources: {}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+        terminationMessagePolicy: FallbackToLogsOnError
+        volumeMounts:
+        - mountPath: /etc/headscale
+          name: config
+          readOnly: true
+        - mountPath: /var/lib/headscale
+          name: data
+      securityContext:
+        fsGroup: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: headscale
+      volumes:
+      - configMap:
+          name: headscale-config
+        name: config
+  updateStrategy: {}
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 128Mi
+    status: {}
+status:
+  availableReplicas: 0
+  replicas: 0
