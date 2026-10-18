@@ -113,6 +113,11 @@ func (r *Restorer) Restore(ctx context.Context) error {
 		if got := sha256Hex(data); got != entry.SHA256 {
 			return fmt.Errorf("%s key checksum mismatch: archive manifest has %s, downloaded %s", key.Role, entry.SHA256, got)
 		}
+		// Keys may be configured in a subdirectory of the data volume, which a
+		// fresh volume doesn't have yet.
+		if err := os.MkdirAll(filepath.Dir(key.Path), 0o700); err != nil {
+			return fmt.Errorf("failed to create the directory of the %s key: %w", key.Role, err)
+		}
 		tmp := key.Path + StagedSuffix
 		if err := writeFileSync(tmp, data, 0o600); err != nil {
 			return fmt.Errorf("failed to stage %s key: %w", key.Role, err)

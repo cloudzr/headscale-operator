@@ -354,6 +354,14 @@ var _ = Describe("Restorer", func() {
 		Expect(filepath.Join(dir, RestoredMarkerFile)).To(BeAnExistingFile())
 	})
 
+	It("creates the directory of a key configured in a subdirectory", func() {
+		keys = []KeyFile{{Role: RoleNoise, Path: filepath.Join(dir, "keys", "noise_private.key")}}
+		archiveKey(RoleNoise, "noise-key")
+		stageDB()
+		Expect(restorer().Restore(ctx)).To(Succeed())
+		Expect(os.ReadFile(keys[0].Path)).To(Equal([]byte("noise-key")))
+	})
+
 	It("moves SQLite sidecar files together with the database", func() {
 		archiveKey(RoleNoise, "noise-key")
 		stageDB()
