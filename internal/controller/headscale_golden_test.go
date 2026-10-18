@@ -54,15 +54,15 @@ var _ = DescribeTable("StatefulSet rendering without backup (regression guard)",
 		}
 		h.Spec.ImagePullSecrets = []string{"regcred"}
 		h.Spec.ExtraEnv = []corev1.EnvVar{{Name: "TZ", Value: "UTC"}}
-		h.Spec.ExtraVolumes = []corev1.Volume{{Name: "extra", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}
+		h.Spec.ExtraVolumes = []corev1.Volume{{Name: "extra", EmptyDir: &corev1.EmptyDirVolumeSource{}}}
 		h.Spec.ExtraVolumeMounts = []corev1.VolumeMount{{Name: "extra", MountPath: "/extra"}}
 	})),
 )
 
 func goldenHeadscale(mutate func(h *headscalev1beta1.Headscale)) *headscalev1beta1.Headscale {
 	h := &headscalev1beta1.Headscale{
-		Name:      "headscale",
-		Namespace: "headscale",
+		Name:      headscaleAppName,
+		Namespace: headscaleAppName,
 		Spec: headscalev1beta1.HeadscaleSpec{
 			Version:  "v0.29.1",
 			Image:    "headscale/headscale",

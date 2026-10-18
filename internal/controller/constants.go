@@ -13,5 +13,6 @@ const (
 const (
 	headscaleAppName           = "headscale"
 	socketVolumeName           = "socket"
+	dataVolumeName             = "data"
 	apiKeyManagerContainerName = "apikey-manager"
 )

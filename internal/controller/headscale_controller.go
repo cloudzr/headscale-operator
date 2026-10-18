@@ -9,6 +9,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -23,6 +24,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	headscalev1beta1 "github.com/infradohq/headscale-operator/api/v1beta1"
+	"github.com/infradohq/headscale-operator/internal/objectstore"
 )
 
 // HeadscaleReconciler reconciles a Headscale object
@@ -30,6 +32,13 @@ type HeadscaleReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder events.EventRecorder
+
+	// BackupAgentImage is the default backup-agent image, normally matching
+	// the operator release. spec.backup.agent.image overrides it.
+	BackupAgentImage string
+	// NewObjectStore builds archive clients. Defaults to objectstore.NewS3;
+	// tests inject an in-memory store.
+	NewObjectStore func(objectstore.Config) (objectstore.Store, error)
 }
 
 // notReadyRequeue is how long to wait before re-checking workload readiness when
@@ -164,9 +173,17 @@ func (r *HeadscaleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
+	// Continuous archiving is opt-in: without spec.backup this is a no-op and
+	// the StatefulSet is rendered exactly as before.
+	backup := r.prepareBackup(ctx, headscale, view)
+	if err := r.reconcileLitestreamConfigMap(ctx, headscale, backup); err != nil {
+		log.Error(err, "Failed to reconcile Litestream ConfigMap")
+		return ctrl.Result{}, err
+	}
+
 	// Reconcile StatefulSet
 	configHash := computeConfigHash(rendered)
-	if err := r.reconcileStatefulSet(ctx, headscale, view, configHash); err != nil {
+	if err := r.reconcileStatefulSet(ctx, headscale, view, configHash, backup); err != nil {
 		log.Error(err, "Failed to reconcile StatefulSet")
 		return ctrl.Result{}, err
 	}
@@ -187,15 +204,21 @@ func (r *HeadscaleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// headscale rejects at startup surfaces here instead of silently looking
 	// healthy.
 	readyCond, requeue := r.computeReadyCondition(ctx, headscale)
+	archivingCond := r.computeArchivingCondition(ctx, headscale, &backup)
+	r.emitArchivingEvent(headscale, archivingCond)
 
 	// Update status
-	if err := r.updateStatus(ctx, headscale, configCond, policyCond, readyCond); err != nil {
+	if err := r.updateStatusWithBackup(ctx, headscale, backup.status, archivingCond, configCond, policyCond, readyCond); err != nil {
 		log.Error(err, "Failed to update Headscale status")
 		return ctrl.Result{}, err
 	}
 
-	if requeue {
+	switch {
+	case requeue || (archivingCond != nil && archivingCond.Status != metav1.ConditionTrue):
 		return ctrl.Result{RequeueAfter: notReadyRequeue}, nil
+	case archivingCond != nil:
+		// Refresh the recoverability window shown in status.backup.
+		return ctrl.Result{RequeueAfter: backupStatusRequeue}, nil
 	}
 	return ctrl.Result{}, nil
 }
@@ -300,8 +323,19 @@ func (r *HeadscaleReconciler) reconcileConfigMap(ctx context.Context, headscale 
 }
 
 // reconcileStatefulSet reconciles the StatefulSet for Headscale
-func (r *HeadscaleReconciler) reconcileStatefulSet(ctx context.Context, headscale *headscalev1beta1.Headscale, view headscaleConfigView, configHash string) error {
+func (r *HeadscaleReconciler) reconcileStatefulSet(
+	ctx context.Context,
+	headscale *headscalev1beta1.Headscale,
+	view headscaleConfigView,
+	configHash string,
+	backup backupState,
+) error {
 	statefulSet := r.statefulSetForHeadscale(headscale, view, configHash)
+	if backup.plan != nil {
+		r.addBackupSidecars(headscale, &statefulSet.Spec.Template.Spec, *backup.plan)
+		statefulSet.Spec.Template.Annotations[backupConfigHashAnnotation] = computeConfigHash(
+			append(backup.litestreamConfig, []byte(r.backupAgentImageFor(headscale))...))
+	}
 	return r.applyResource(ctx, headscale, statefulSet)
 }
 
@@ -347,6 +381,37 @@ func (r *HeadscaleReconciler) updateStatus(
 	patch := client.MergeFrom(headscale.DeepCopy())
 
 	changed := false
+	for _, cond := range conds {
+		if meta.SetStatusCondition(&headscale.Status.Conditions, cond) {
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+
+	return r.Status().Patch(ctx, headscale, patch)
+}
+
+// updateStatusWithBackup is updateStatus plus the backup status: it sets
+// status.backup and the ContinuousArchiving condition, removing both when
+// backup is disabled (archiving is nil).
+func (r *HeadscaleReconciler) updateStatusWithBackup(
+	ctx context.Context,
+	headscale *headscalev1beta1.Headscale,
+	backup *headscalev1beta1.BackupStatus,
+	archiving *metav1.Condition,
+	conds ...metav1.Condition,
+) error {
+	patch := client.MergeFrom(headscale.DeepCopy())
+
+	changed := !equality.Semantic.DeepEqual(headscale.Status.Backup, backup)
+	headscale.Status.Backup = backup
+	if archiving != nil {
+		conds = append(conds, *archiving)
+	} else if meta.RemoveStatusCondition(&headscale.Status.Conditions, continuousArchivingConditionType) {
+		changed = true
+	}
 	for _, cond := range conds {
 		if meta.SetStatusCondition(&headscale.Status.Conditions, cond) {
 			changed = true
@@ -451,7 +516,7 @@ func (r *HeadscaleReconciler) statefulSetForHeadscale(h *headscalev1beta1.Headsc
 					ReadOnly:  true,
 				},
 				{
-					Name:      "data",
+					Name:      dataVolumeName,
 					MountPath: "/var/lib/headscale",
 				},
 			},
@@ -472,15 +537,7 @@ func (r *HeadscaleReconciler) statefulSetForHeadscale(h *headscalev1beta1.Headsc
 				InitialDelaySeconds: 5,
 				PeriodSeconds:       5,
 			},
-			SecurityContext: &corev1.SecurityContext{
-				AllowPrivilegeEscalation: new(false),
-				Capabilities: &corev1.Capabilities{
-					Drop: []corev1.Capability{"ALL"},
-				},
-				SeccompProfile: &corev1.SeccompProfile{
-					Type: corev1.SeccompProfileTypeRuntimeDefault,
-				},
-			},
+			SecurityContext: restrictedSecurityContext(),
 		},
 	}
 
@@ -546,15 +603,7 @@ func (r *HeadscaleReconciler) statefulSetForHeadscale(h *headscalev1beta1.Headsc
 					MountPath: "/var/run/headscale",
 				},
 			},
-			SecurityContext: &corev1.SecurityContext{
-				AllowPrivilegeEscalation: new(false),
-				Capabilities: &corev1.Capabilities{
-					Drop: []corev1.Capability{"ALL"},
-				},
-				SeccompProfile: &corev1.SeccompProfile{
-					Type: corev1.SeccompProfileTypeRuntimeDefault,
-				},
-			},
+			SecurityContext: restrictedSecurityContext(),
 		})
 	}
 
@@ -601,7 +650,7 @@ func (r *HeadscaleReconciler) statefulSetForHeadscale(h *headscalev1beta1.Headsc
 			},
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
 				{
-					Name: "data",
+					Name: dataVolumeName,
 					Spec: pvcSpec,
 				},
 			},

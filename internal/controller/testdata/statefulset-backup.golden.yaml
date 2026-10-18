@@ -1,0 +1,203 @@
+metadata:
+  labels:
+    app.kubernetes.io/instance: headscale
+    app.kubernetes.io/managed-by: headscale-operator
+    app.kubernetes.io/name: headscale
+  name: headscale
+  namespace: headscale
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: headscale
+      app.kubernetes.io/managed-by: headscale-operator
+      app.kubernetes.io/name: headscale
+  serviceName: headscale
+  template:
+    metadata:
+      annotations:
+        headscale.infrado.cloud/backup-config-hash: 29a6b1ee593fa0ca
+        headscale.infrado.cloud/config-hash: f54a08368f88a897
+      labels:
+        app.kubernetes.io/instance: headscale
+        app.kubernetes.io/managed-by: headscale-operator
+        app.kubernetes.io/name: headscale
+    spec:
+      containers:
+      - command:
+        - headscale
+        - serve
+        image: headscale/headscale:v0.29.1
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        name: headscale
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        - containerPort: 9090
+          name: metrics
+          protocol: TCP
+        - containerPort: 50443
+          name: grpc
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources: {}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+        terminationMessagePolicy: FallbackToLogsOnError
+        volumeMounts:
+        - mountPath: /etc/headscale
+          name: config
+          readOnly: true
+        - mountPath: /var/lib/headscale
+          name: data
+        - mountPath: /var/run/headscale
+          name: socket
+      - args:
+        - --socket-path=/var/run/headscale/headscale.sock
+        - --secret-name=headscale-api-key
+        - --expiration=2160h
+        - --rotation-buffer=240h
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        image: ghcr.io/infradohq/headscale-operator/apikey-manager:latest
+        imagePullPolicy: IfNotPresent
+        name: apikey-manager
+        resources: {}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+        volumeMounts:
+        - mountPath: /var/run/headscale
+          name: socket
+      initContainers:
+      - args:
+        - replicate
+        - -config
+        - /etc/litestream/litestream.yml
+        env:
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              key: id
+              name: s3
+              optional: true
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              key: secret
+              name: s3
+              optional: true
+        image: litestream/litestream:0.5.17
+        imagePullPolicy: IfNotPresent
+        name: litestream
+        ports:
+        - containerPort: 9091
+          name: ls-metrics
+          protocol: TCP
+        resources: {}
+        restartPolicy: Always
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+        volumeMounts:
+        - mountPath: /var/lib/headscale
+          name: data
+        - mountPath: /etc/litestream
+          name: litestream-config
+          readOnly: true
+      - args:
+        - archive-keys
+        - --destination=s3://bucket/prod
+        - --endpoint=http://s3.example.com:7070
+        - --region=us-east-1
+        - --key=noise=/var/lib/headscale/noise_private.key
+        - --key=derp=/var/lib/headscale/derp_server_private.key
+        - --interval=30s
+        env:
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              key: id
+              name: s3
+              optional: true
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              key: secret
+              name: s3
+              optional: true
+        image: ghcr.io/infradohq/headscale-operator/backup-agent:v0.7.0
+        imagePullPolicy: IfNotPresent
+        name: backup-agent
+        resources: {}
+        restartPolicy: Always
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+        volumeMounts:
+        - mountPath: /var/lib/headscale
+          name: data
+          readOnly: true
+      securityContext:
+        fsGroup: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: headscale
+      volumes:
+      - configMap:
+          name: headscale-config
+        name: config
+      - emptyDir: {}
+        name: socket
+      - configMap:
+          name: headscale-litestream
+        name: litestream-config
+  updateStrategy: {}
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 128Mi
+    status: {}
+status:
+  availableReplicas: 0
+  replicas: 0

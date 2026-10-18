@@ -19,6 +19,7 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
+	"path"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/yaml"
@@ -35,6 +36,12 @@ const (
 	defaultGRPCListenAddr    = "0.0.0.0:50443"
 	defaultUnixSocket        = "/var/run/headscale/headscale.sock"
 	defaultPolicyMode        = "file"
+
+	// headscaleDataDir is where the StatefulSet mounts the PVC, and
+	// headscaleConfigDir where it mounts config.yaml. Headscale resolves
+	// relative paths in its config against the config file's directory.
+	headscaleDataDir   = "/var/lib/headscale"
+	headscaleConfigDir = "/etc/headscale"
 )
 
 // headscaleConfigView is a partial, typed view over spec.config holding only the
@@ -48,6 +55,13 @@ type headscaleConfigView struct {
 	GRPCListenAddr    string
 	UnixSocket        string
 	PolicyMode        string
+
+	DatabaseType      string
+	SQLitePath        string
+	SQLiteWAL         bool
+	NoiseKeyPath      string
+	DERPServerEnabled bool
+	DERPKeyPath       string
 }
 
 // rawConfigDoc mirrors the JSON shape of the keys parseConfigView extracts.
@@ -60,6 +74,22 @@ type rawConfigDoc struct {
 	Policy            struct {
 		Mode string `json:"mode"`
 	} `json:"policy"`
+	Database struct {
+		Type   string `json:"type"`
+		SQLite struct {
+			Path          string `json:"path"`
+			WriteAheadLog *bool  `json:"write_ahead_log"`
+		} `json:"sqlite"`
+	} `json:"database"`
+	Noise struct {
+		PrivateKeyPath string `json:"private_key_path"`
+	} `json:"noise"`
+	DERP struct {
+		Server struct {
+			Enabled        bool   `json:"enabled"`
+			PrivateKeyPath string `json:"private_key_path"`
+		} `json:"server"`
+	} `json:"derp"`
 }
 
 // parseConfigView extracts the operator-relevant keys from spec.config, filling
@@ -79,7 +109,26 @@ func parseConfigView(raw runtime.RawExtension) headscaleConfigView {
 		GRPCListenAddr:    firstNonEmpty(doc.GRPCListenAddr, defaultGRPCListenAddr),
 		UnixSocket:        firstNonEmpty(doc.UnixSocket, defaultUnixSocket),
 		PolicyMode:        firstNonEmpty(doc.Policy.Mode, defaultPolicyMode),
+		// Headscale has no defaults for the database type or the database
+		// and key paths (it refuses to start without them), so these are
+		// left empty when unset rather than guessed.
+		DatabaseType: doc.Database.Type,
+		SQLitePath:   headscalePath(doc.Database.SQLite.Path),
+		// Headscale enables SQLite write-ahead logging unless told otherwise.
+		SQLiteWAL:         doc.Database.SQLite.WriteAheadLog == nil || *doc.Database.SQLite.WriteAheadLog,
+		NoiseKeyPath:      headscalePath(doc.Noise.PrivateKeyPath),
+		DERPServerEnabled: doc.DERP.Server.Enabled,
+		DERPKeyPath:       headscalePath(doc.DERP.Server.PrivateKeyPath),
 	}
+}
+
+// headscalePath resolves a path from headscale's config the way headscale
+// does: relative paths are relative to the config file's directory.
+func headscalePath(p string) string {
+	if p == "" || path.IsAbs(p) {
+		return p
+	}
+	return path.Join(headscaleConfigDir, p)
 }
 
 // renderConfigYAML produces headscale's config.yaml from spec.config. Every
