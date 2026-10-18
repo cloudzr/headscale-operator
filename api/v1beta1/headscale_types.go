@@ -111,7 +111,10 @@ type ObjectStoreConfig struct {
 	// DestinationPath is the archive location, in the form
 	// s3://<bucket>[/<prefix>], without a trailing slash. The database is
 	// stored under <prefix>/db, headscale's private keys under <prefix>/keys.
-	// +kubebuilder:validation:Pattern=`^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9](/[^/]+)*$`
+	// Prefix segments are limited to letters, digits, '_', '.' and '-' (and
+	// can't be '.' or '..'): Litestream reads the path as a URL, so a '?',
+	// '#' or '%' would make it write somewhere else than the operator checks.
+	// +kubebuilder:validation:Pattern=`^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9](/\.*[A-Za-z0-9_-][A-Za-z0-9_.-]*)*$`
 	// +kubebuilder:validation:MaxLength=1024
 	// +required
 	DestinationPath string `json:"destination_path"`

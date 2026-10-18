@@ -84,6 +84,24 @@ var _ = Describe("Headscale CRD validation for backup and bootstrap", func() {
 		Entry("non-s3 destination scheme", func(h *headscalev1beta1.Headscale) {
 			h.Spec.Backup = &headscalev1beta1.BackupConfig{ObjectStore: validObjectStore("gs://bucket/prod")}
 		}, "destination_path"),
+		Entry("destination with nested, dotted prefix segments", func(h *headscalev1beta1.Headscale) {
+			h.Spec.Backup = &headscalev1beta1.BackupConfig{ObjectStore: validObjectStore("s3://my.bucket/team_a/prod-1/v1.2/.hidden")}
+		}, ""),
+		Entry("destination with a query character", func(h *headscalev1beta1.Headscale) {
+			h.Spec.Backup = &headscalev1beta1.BackupConfig{ObjectStore: validObjectStore("s3://bucket/team?x")}
+		}, "destination_path"),
+		Entry("destination with a fragment character", func(h *headscalev1beta1.Headscale) {
+			h.Spec.Backup = &headscalev1beta1.BackupConfig{ObjectStore: validObjectStore("s3://bucket/team#x")}
+		}, "destination_path"),
+		Entry("destination with a percent-encoding", func(h *headscalev1beta1.Headscale) {
+			h.Spec.Backup = &headscalev1beta1.BackupConfig{ObjectStore: validObjectStore("s3://bucket/team%20a")}
+		}, "destination_path"),
+		Entry("destination with a parent segment", func(h *headscalev1beta1.Headscale) {
+			h.Spec.Backup = &headscalev1beta1.BackupConfig{ObjectStore: validObjectStore("s3://bucket/prod/..")}
+		}, "destination_path"),
+		Entry("destination with a current segment", func(h *headscalev1beta1.Headscale) {
+			h.Spec.Backup = &headscalev1beta1.BackupConfig{ObjectStore: validObjectStore("s3://bucket/./prod")}
+		}, "destination_path"),
 		Entry("destination with trailing slash", func(h *headscalev1beta1.Headscale) {
 			h.Spec.Backup = &headscalev1beta1.BackupConfig{ObjectStore: validObjectStore("s3://bucket/prod/")}
 		}, "destination_path"),
